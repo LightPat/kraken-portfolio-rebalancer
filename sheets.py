@@ -18,22 +18,34 @@ def get_gspread_client():
 
 
 def get_target_allocations() -> dict[str, float]:
-    """Return {ASSET: target_percentage} from Google Sheet"""
+    """Return {ASSET: target_percentage} from Google Sheet.
+
+    Reads asset names from Column A (starting at row 8)
+    and target percentages from Column C (starting at row 8).
+    Stops at the first empty row in Column A.
+    """
     spreadsheet_id = os.getenv("SPREADSHEET_ID")
     if not spreadsheet_id:
         raise ValueError("SPREADSHEET_ID not set in .env")
 
     gc = get_gspread_client()
     worksheet = gc.open_by_key(spreadsheet_id).worksheet("Portfolio")
-    data = worksheet.get_all_records()
+
+    # Fetch only the needed columns starting at row 8 (one API call)
+    values = worksheet.get_values("A8:C")
 
     targets = {}
-    for row in data:
-        asset = str(row.get("Asset", "")).strip().upper()
+    for row in values:
+        # row[0] = Column A (Asset), row[2] = Column C (Percentage)
+        if not row or len(row) == 0:
+            break
+
+        asset = str(row[0] if len(row) > 0 else "").strip().upper()
         if not asset:
-            continue
+            break  # Stop at the first empty asset row (as requested)
+
         try:
-            pct = float(row.get("Target Percentage", 0))
+            pct = float(row[2] if len(row) > 2 else 0)
             if pct > 0:
                 targets[asset] = pct
         except ValueError, TypeError:

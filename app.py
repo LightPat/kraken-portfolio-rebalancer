@@ -20,7 +20,7 @@ async def health():
     return {"status": "ok"}
 
 
-@app.post("/rebalance/plan", response_model=PlanResponse)
+@app.get("/rebalance/plan", response_model=PlanResponse)
 async def get_plan():
     return generate_rebalance_plan()
 

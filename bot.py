@@ -28,7 +28,7 @@ async def rebalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.post(f"{FASTAPI_URL}/rebalance/plan")
+            resp = await client.get(f"{FASTAPI_URL}/rebalance/plan")
             resp.raise_for_status()
             data = resp.json()
     except Exception as e:
