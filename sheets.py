@@ -17,12 +17,32 @@ def get_gspread_client():
     return gspread.authorize(credentials)
 
 
+def _parse_target_percentage(val) -> float:
+    """Parse a percentage value like '0.0%', '40%', '0.4' or 25 into a float fraction (0.0-1.0)."""
+    if val is None or val == '':
+        return 0.0
+    if isinstance(val, (int, float)):
+        val = float(val)
+        return val / 100 if val > 1 else val
+    if isinstance(val, str):
+        val = val.strip().rstrip('%').strip()
+        try:
+            pct = float(val)
+            return pct / 100 if pct > 1 else pct
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
 def get_target_allocations() -> dict[str, float]:
     """Return {ASSET: target_percentage} from Google Sheet.
 
-    Reads asset names from Column A (starting at row 8)
-    and target percentages from Column C (starting at row 8).
+    Expects rows like ['BTC', 'Long', '0.0%'] or ['ETH', 'Long', '40%'] starting from row 8 in "Signals" sheet.
+    - Column A: Asset
+    - Column B: Direction (e.g. Long) - ignored for now
+    - Column C: Target percentage string like '0.0%' or '40%'
     Stops at the first empty row in Column A.
+    Percentages converted to decimal (0.0 - 1.0).
     """
     spreadsheet_id = os.getenv("GOOGLE_DOCS_SHEET_ID")
     if not spreadsheet_id:
@@ -44,12 +64,11 @@ def get_target_allocations() -> dict[str, float]:
         if not asset:
             break  # Stop at the first empty asset row (as requested)
 
-        try:
-            pct = float(row[2] if len(row) > 2 else 0)
-            if pct > 0:
-                targets[asset] = pct
-        except ValueError, TypeError:
-            continue
+        # Parse percentage from column C, handling 'XX%' format
+        pct_str = row[2] if len(row) > 2 else None
+        pct = _parse_target_percentage(pct_str)
+        if pct > 0:
+            targets[asset] = pct
 
     total = sum(targets.values())
     if abs(total - 1.0) > 0.02:
