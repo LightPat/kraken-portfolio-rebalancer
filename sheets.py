@@ -29,7 +29,7 @@ def get_target_allocations() -> dict[str, float]:
         raise ValueError("GOOGLE_DOCS_SHEET_ID not set in .env")
 
     gc = get_gspread_client()
-    worksheet = gc.open_by_key(spreadsheet_id).worksheet("Portfolio")
+    worksheet = gc.open_by_key(spreadsheet_id).worksheet("Signals")
 
     # Fetch only the needed columns starting at row 8 (one API call)
     values = worksheet.get_values("A8:C")
