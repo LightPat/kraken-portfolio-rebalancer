@@ -19,13 +19,13 @@ def get_gspread_client():
 
 def _parse_target_percentage(val) -> float:
     """Parse a percentage value like '0.0%', '40%', '0.4' or 25 into a float fraction (0.0-1.0)."""
-    if val is None or val == '':
+    if val is None or val == "":
         return 0.0
     if isinstance(val, (int, float)):
         val = float(val)
         return val / 100 if val > 1 else val
     if isinstance(val, str):
-        val = val.strip().rstrip('%').strip()
+        val = val.strip().rstrip("%").strip()
         try:
             pct = float(val)
             return pct / 100 if pct > 1 else pct
