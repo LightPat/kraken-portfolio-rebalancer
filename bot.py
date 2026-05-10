@@ -12,8 +12,6 @@ FASTAPI_URL = os.getenv("FASTAPI_URL").rstrip("/")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_KRAKEN_PORTFOLIO_REBALANCER_BOT_HTTP_TOKEN")
 ALLOWED_USER_ID = int(os.getenv("TELEGRAM_USER_ID"))
 
-pending_plans: dict[int, list] = {}  # user_id -> plan (single user, but safe)
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -56,9 +54,6 @@ async def rebalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup,
     )
 
-    # Store plan for this user
-    pending_plans[update.effective_user.id] = data["plan"]
-
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -71,27 +66,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "cancel":
         await query.edit_message_text("❌ Rebalance cancelled.")
-        pending_plans.pop(user_id, None)
         return
 
     if query.data == "confirm":
-        plan = pending_plans.get(user_id)
-        if not plan:
-            await query.edit_message_text("❌ No plan found. Run /rebalance again.")
-            return
-
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.post(f"{FASTAPI_URL}/rebalance/execute", json=plan)
+                resp = await client.post(f"{FASTAPI_URL}/rebalance/execute")
                 resp.raise_for_status()
                 result = resp.json()
         except Exception as e:
             await query.edit_message_text(f"❌ Execute failed: {e}")
             return
 
-        result_text = "\n".join(result["results"])
+        result_text = "\n".join(result.get("results", ["No details returned"]))
         await query.edit_message_text(f"🚀 Rebalance executed!\n\n{result_text}")
-        pending_plans.pop(user_id, None)
 
 
 def main():

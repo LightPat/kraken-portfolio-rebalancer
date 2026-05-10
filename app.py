@@ -26,11 +26,35 @@ async def get_plan():
 
 
 @app.post("/rebalance/execute")
-async def execute(plan: List[Dict[str, Any]]):
-    if not plan:
-        raise HTTPException(400, "Empty plan")
-    results = execute_trades(plan)
+async def execute_rebalance():
+    """Generate a fresh rebalance plan and execute the trades.
+    No request body needed anymore — always uses the latest data from Google Sheets + Kraken.
+    """
+    # 1. Get the latest plan (same as /rebalance/plan)
+    plan_data = generate_rebalance_plan()
+    trade_plan = plan_data.get("plan", [])
+
+    # 2. Early return if nothing to do
+    if not trade_plan:
+        return {
+            "status": "already_balanced",
+            "message": "Portfolio is already balanced according to targets.",
+            "dry_run": plan_data["dry_run"],
+            "total_value_usd": plan_data["total_value_usd"],
+            "quote_currency": plan_data["quote_currency"],
+            "plan_data": plan_data,  # for debugging/logging
+        }
+
+    # 3. Execute the trades
+    results = execute_trades(trade_plan)
+
+    # 4. Return clear success info
     return {
+        "status": "executed",
+        "message": "Rebalance trades executed successfully.",
         "results": results,
-        "dry_run": os.getenv("DRY_RUN", "false").lower() == "true",
+        "dry_run": plan_data["dry_run"],
+        "total_value_usd": plan_data["total_value_usd"],
+        "executed_plan": trade_plan,
+        "plan_data": plan_data,
     }
