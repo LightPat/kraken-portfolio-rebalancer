@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any
 import os
-from .rebalancer import generate_rebalance_plan, execute_trades
+from rebalancer import generate_rebalance_plan, execute_trades
 
 app = FastAPI(title="Kraken Portfolio Rebalancer API")
 

@@ -1,7 +1,7 @@
 import os
 from typing import List, Dict, Any
-from .sheets import get_target_allocations
-from .kraken import fetch_portfolio, get_kraken_exchange
+from sheets import get_target_allocations
+from kraken import fetch_portfolio, get_kraken_exchange
 
 
 def generate_rebalance_plan() -> Dict[str, Any]:
