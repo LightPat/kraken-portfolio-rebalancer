@@ -24,9 +24,9 @@ def get_target_allocations() -> dict[str, float]:
     and target percentages from Column C (starting at row 8).
     Stops at the first empty row in Column A.
     """
-    spreadsheet_id = os.getenv("SPREADSHEET_ID")
+    spreadsheet_id = os.getenv("GOOGLE_DOCS_SHEET_ID")
     if not spreadsheet_id:
-        raise ValueError("SPREADSHEET_ID not set in .env")
+        raise ValueError("GOOGLE_DOCS_SHEET_ID not set in .env")
 
     gc = get_gspread_client()
     worksheet = gc.open_by_key(spreadsheet_id).worksheet("Portfolio")
