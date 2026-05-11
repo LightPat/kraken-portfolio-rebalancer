@@ -3,14 +3,15 @@ import json
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
+# Global cached client
+_gspread_client = None
+
 
 def get_gspread_client():
-    """Get authenticated gspread client.
-
-    Supports TWO environments:
-    - Local dev (Dashlane): GOOGLE_CREDENTIALS = "{...full json...}"
-    - Linux server: GOOGLE_CREDENTIALS = path to google-credentials.json
-    """
+    """Get authenticated gspread client (cached for performance)."""
+    global _gspread_client
+    if _gspread_client is not None:
+        return _gspread_client
 
     # Preferred: JSON file (Linux droplet)
     creds_path = os.getenv("GOOGLE_CREDENTIALS")
@@ -22,7 +23,8 @@ def get_gspread_client():
         credentials = ServiceAccountCredentials.from_json_keyfile_name(
             creds_path, scope
         )
-        return gspread.authorize(credentials)
+        _gspread_client = gspread.authorize(credentials)
+        return _gspread_client
 
     # Fallback: JSON string (local dev with Dashlane)
     creds_json = os.getenv("GOOGLE_CREDENTIALS")
@@ -37,7 +39,8 @@ def get_gspread_client():
         "https://www.googleapis.com/auth/drive",
     ]
     credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    return gspread.authorize(credentials)
+    _gspread_client = gspread.authorize(credentials)
+    return _gspread_client
 
 
 def _parse_target_percentage(val) -> float:
