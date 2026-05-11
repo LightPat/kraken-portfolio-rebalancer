@@ -8,9 +8,17 @@ from telegram.ext import (
     ContextTypes,
 )
 
+# === CONFIG FROM ENV ===
 FASTAPI_URL = os.getenv("FASTAPI_URL").rstrip("/")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_KRAKEN_PORTFOLIO_REBALANCER_BOT_HTTP_TOKEN")
 ALLOWED_USER_ID = int(os.getenv("TELEGRAM_USER_ID"))
+
+# Webhook config (new)
+USE_WEBHOOK = os.getenv("USE_WEBHOOK", "true").lower() == "true"
+TELEGRAM_WEBHOOK_URL = os.getenv(
+    "TELEGRAM_WEBHOOK_URL"
+)  # e.g. https://your-domain.com/telegram-webhook
+TELEGRAM_WEBHOOK_PORT = int(os.getenv("TELEGRAM_WEBHOOK_PORT", "8443"))
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -89,8 +97,17 @@ def main():
     app.add_handler(CommandHandler("rebalance", rebalance_command))
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    print("🤖 Telegram bot starting (polling)...")
-    app.run_polling()
+    if USE_WEBHOOK and TELEGRAM_WEBHOOK_URL:
+        print(f"🤖 Telegram bot starting with **webhooks** → {TELEGRAM_WEBHOOK_URL}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=TELEGRAM_WEBHOOK_PORT,
+            url_path="telegram-webhook",  # must match the end of TELEGRAM_WEBHOOK_URL
+            webhook_url=TELEGRAM_WEBHOOK_URL,  # full public HTTPS URL
+        )
+    else:
+        print("🤖 Telegram bot starting (polling)...")
+        app.run_polling()
 
 
 if __name__ == "__main__":
