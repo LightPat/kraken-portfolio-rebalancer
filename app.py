@@ -4,7 +4,12 @@ from typing import List, Dict, Any
 import os
 from rebalancer import generate_rebalance_plan, execute_trades
 
-app = FastAPI(title="Kraken Portfolio Rebalancer API")
+app = FastAPI(
+    title="Kraken Portfolio Rebalancer API",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 
 class PlanResponse(BaseModel):
