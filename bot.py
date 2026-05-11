@@ -12,6 +12,7 @@ from telegram.ext import (
 FASTAPI_URL = os.getenv("FASTAPI_URL").rstrip("/")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_KRAKEN_PORTFOLIO_REBALANCER_BOT_HTTP_TOKEN")
 ALLOWED_USER_ID = int(os.getenv("TELEGRAM_USER_ID"))
+REBALANCER_API_KEY = os.getenv("REBALANCER_API_KEY")
 
 # Webhook config
 USE_WEBHOOK = os.getenv("USE_WEBHOOK", "true").lower() == "true"
@@ -33,7 +34,10 @@ async def rebalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         timeout = httpx.Timeout(60.0, connect=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.get(f"{FASTAPI_URL}/rebalance/plan")
+            resp = await client.get(
+                f"{FASTAPI_URL}/rebalance/plan",
+                headers={"X-API-Key": REBALANCER_API_KEY},
+            )
             resp.raise_for_status()
             data = resp.json()
     except Exception as e:
@@ -82,7 +86,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             timeout = httpx.Timeout(60.0, connect=10.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(f"{FASTAPI_URL}/rebalance/execute")
+                resp = await client.post(
+                    f"{FASTAPI_URL}/rebalance/execute",
+                    headers={"X-API-Key": REBALANCER_API_KEY},
+                )
                 resp.raise_for_status()
                 result = resp.json()
         except Exception as e:

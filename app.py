@@ -1,8 +1,25 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from typing import List, Dict, Any
 import os
 from rebalancer import generate_rebalance_plan, execute_trades
+
+API_KEY_NAME = "X-API-Key"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+
+
+async def get_api_key(api_key: str = Security(api_key_header)):
+    """Simple header-based API key check. Uses env var REBALANCER_API_KEY."""
+    expected_key = os.getenv("REBALANCER_API_KEY")
+    if not expected_key:
+        raise HTTPException(
+            status_code=500, detail="Server misconfigured - no API key set"
+        )
+    if api_key is None or api_key != expected_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing API key")
+    return api_key
+
 
 app = FastAPI(
     title="Kraken Portfolio Rebalancer API",
@@ -25,16 +42,16 @@ async def health():
     return {"status": "ok"}
 
 
-@app.get("/rebalance/plan", response_model=PlanResponse)
+@app.get(
+    "/rebalance/plan", response_model=PlanResponse, dependencies=[Depends(get_api_key)]
+)
 async def get_plan():
     return generate_rebalance_plan()
 
 
-@app.post("/rebalance/execute")
+@app.post("/rebalance/execute", dependencies=[Depends(get_api_key)])
 async def execute_rebalance():
-    """Generate a fresh rebalance plan and execute the trades.
-    No request body needed anymore — always uses the latest data from Google Sheets + Kraken.
-    """
+    """Generate a fresh rebalance plan and execute the trades. Always uses the latest data from Google Sheets + Kraken."""
     # 1. Get the latest plan (same as /rebalance/plan)
     plan_data = generate_rebalance_plan()
     trade_plan = plan_data.get("plan", [])
