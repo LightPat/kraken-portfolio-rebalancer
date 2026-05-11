@@ -4,6 +4,8 @@ SHELL := /bin/bash
 
 run:; set -a; source .env; set +a; dcli exec -- uv run main.py
 
+run-bot:; set -a; source .env; set +a; uv run bot.py
+run-bot-dcli:; set -a; source .env; set +a; dcli exec -- uv run bot.py
 
 # Production API (no auto-reload - best for trading bot on VPS)
 run-api:; set -a; source .env; set +a; uv run uvicorn app:app --host 0.0.0.0 --port 8000
