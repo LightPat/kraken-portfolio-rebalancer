@@ -8,16 +8,14 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# === CONFIG FROM ENV ===
+# CONFIG FROM ENV
 FASTAPI_URL = os.getenv("FASTAPI_URL").rstrip("/")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_KRAKEN_PORTFOLIO_REBALANCER_BOT_HTTP_TOKEN")
 ALLOWED_USER_ID = int(os.getenv("TELEGRAM_USER_ID"))
 
-# Webhook config (new)
+# Webhook config
 USE_WEBHOOK = os.getenv("USE_WEBHOOK", "true").lower() == "true"
-TELEGRAM_WEBHOOK_URL = os.getenv(
-    "TELEGRAM_WEBHOOK_URL"
-)  # e.g. https://your-domain.com/telegram-webhook
+TELEGRAM_WEBHOOK_URL = os.getenv("TELEGRAM_WEBHOOK_URL")
 TELEGRAM_WEBHOOK_PORT = int(os.getenv("TELEGRAM_WEBHOOK_PORT", "8443"))
 
 
@@ -33,12 +31,15 @@ async def rebalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        async with httpx.AsyncClient() as client:
+        timeout = httpx.Timeout(60.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get(f"{FASTAPI_URL}/rebalance/plan")
             resp.raise_for_status()
             data = resp.json()
     except Exception as e:
-        await update.message.reply_text(f"❌ Failed to get plan: {e}")
+        await update.message.reply_text(
+            f"❌ Failed to get plan: {type(e).__name__}: {e}"
+        )
         return
 
     plan_text = f"📊 **Rebalance Plan**\nTotal value: ${data['total_value_usd']}\n\n"
@@ -78,12 +79,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "confirm":
         try:
-            async with httpx.AsyncClient() as client:
+            timeout = httpx.Timeout(60.0, connect=10.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(f"{FASTAPI_URL}/rebalance/execute")
                 resp.raise_for_status()
                 result = resp.json()
         except Exception as e:
-            await query.edit_message_text(f"❌ Execute failed: {e}")
+            await query.edit_message_text(f"❌ Execute failed: {type(e).__name__}: {e}")
             return
 
         result_text = "\n".join(result.get("results", ["No details returned"]))
