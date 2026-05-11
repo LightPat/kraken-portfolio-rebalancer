@@ -52,7 +52,7 @@ async def rebalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [
-            InlineKeyboardButton("✅ Confirm & Execute", callback_data="confirm"),
+            InlineKeyboardButton("✅ Execute", callback_data="confirm"),
             InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
         ]
     ]
