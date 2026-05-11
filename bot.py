@@ -32,15 +32,43 @@ async def rebalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Unauthorized")
         return
 
+    print(
+        f"DEBUG: Attempting to call FastAPI at {FASTAPI_URL}/rebalance/plan"
+    )  # ← added for console visibility
+
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(
+            timeout=10.0
+        ) as client:  # added timeout so it doesn't hang forever
             resp = await client.get(f"{FASTAPI_URL}/rebalance/plan")
+            print(f"DEBUG: Received status code: {resp.status_code}")  # ← added
+
             resp.raise_for_status()
             data = resp.json()
-    except Exception as e:
-        await update.message.reply_text(f"❌ Failed to get plan: {e}")
+
+    except httpx.HTTPStatusError as e:
+        error_detail = f"HTTP {e.response.status_code} - {e.response.text[:500]}"
+        print(f"DEBUG: HTTP error from FastAPI: {error_detail}")
+        await update.message.reply_text(f"❌ Failed to get plan: {error_detail}")
         return
 
+    except httpx.RequestError as e:
+        error_detail = f"Request failed: {type(e).__name__} - {str(e) or 'no details'}"
+        print(f"DEBUG: Request error: {error_detail}")
+        await update.message.reply_text(f"❌ Failed to get plan: {error_detail}")
+        return
+
+    except Exception as e:
+        import traceback
+
+        tb = traceback.format_exc()
+        print(f"DEBUG: Unexpected error:\n{tb}")
+        await update.message.reply_text(
+            f"❌ Failed to get plan: {type(e).__name__} - {str(e) or 'no details'}"
+        )
+        return
+
+    # ... rest of the function stays exactly the same (plan_text, keyboard, etc.)
     plan_text = f"📊 **Rebalance Plan**\nTotal value: ${data['total_value_usd']}\n\n"
     for t in data["plan"]:
         plan_text += f"{t['action'].upper()} {t['amount_base']} {t['asset']} (~${t['amount_usd']})\n"
