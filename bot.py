@@ -78,6 +78,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "confirm":
+        await query.edit_message_text("🔄 Rebalance in progress...")
         try:
             timeout = httpx.Timeout(60.0, connect=10.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
