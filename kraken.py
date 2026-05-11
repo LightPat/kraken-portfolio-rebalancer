@@ -46,8 +46,7 @@ def fetch_tickers_batch(symbols: List[str]) -> Dict[str, float]:
 
 
 def fetch_portfolio(quote_currency: str = None) -> Tuple[Dict[str, float], float]:
-    """Returns {asset: value_in_quote}, total_value_in_quote
-    Now uses batch ticker fetching for speed."""
+    """Returns {asset: value_in_quote}, total_value_in_quote"""
     if quote_currency is None:
         quote_currency = os.getenv("QUOTE_CURRENCY", "USDC").upper()
 
