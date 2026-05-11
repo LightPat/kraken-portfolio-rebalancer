@@ -5,9 +5,32 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 
 def get_gspread_client():
+    """Get authenticated gspread client.
+
+    Supports TWO environments:
+    - Local dev (Dashlane): GOOGLE_CREDENTIALS = "{...full json...}"
+    - Linux server: GOOGLE_CREDENTIALS = path to google-credentials.json
+    """
+
+    # Preferred: JSON file (Linux droplet)
+    creds_path = os.getenv("GOOGLE_CREDENTIALS")
+    if creds_path and os.path.exists(creds_path):
+        scope = [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        credentials = ServiceAccountCredentials.from_json_keyfile_name(
+            creds_path, scope
+        )
+        return gspread.authorize(credentials)
+
+    # Fallback: JSON string (local dev with Dashlane)
     creds_json = os.getenv("GOOGLE_CREDENTIALS")
     if not creds_json:
-        raise ValueError("GOOGLE_CREDENTIALS not found in .env")
+        raise ValueError(
+            "Neither GOOGLE_CREDENTIALS (filepath) nor (JSON string) "
+            "found in .env file. Check your environment setup."
+        )
     creds_dict = json.loads(creds_json)
     scope = [
         "https://spreadsheets.google.com/feeds",
