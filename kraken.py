@@ -4,6 +4,7 @@ from typing import Dict, List, Tuple, Any
 
 _exchange = None
 
+
 def get_kraken_exchange():
     """Singleton CCXT Kraken exchange instance for reuse."""
     global _exchange

@@ -6,6 +6,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 # Global cached client
 _gspread_client = None
 
+
 def get_gspread_client():
     """Get authenticated gspread client (cached for performance)."""
     global _gspread_client
