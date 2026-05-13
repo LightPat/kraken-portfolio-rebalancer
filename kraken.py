@@ -4,6 +4,7 @@ from typing import Dict, List, Tuple, Any
 
 _exchange = None
 
+
 def get_kraken_exchange():
     """Singleton CCXT Kraken exchange instance for reuse."""
     global _exchange
@@ -16,6 +17,7 @@ def get_kraken_exchange():
             }
         )
     return _exchange
+
 
 def fetch_tickers_batch(symbols: List[str]) -> Dict[str, float]:
     """Fetch multiple tickers in one API call. Returns {symbol: last_price}."""
@@ -42,6 +44,7 @@ def fetch_tickers_batch(symbols: List[str]) -> Dict[str, float]:
                 pass
     return prices
 
+
 def get_stable_balances() -> Dict[str, float]:
     """Returns current free USD and USDC balances."""
     exchange = get_kraken_exchange()
@@ -50,6 +53,7 @@ def get_stable_balances() -> Dict[str, float]:
         "USD": float(balance.get("USD", 0.0)),
         "USDC": float(balance.get("USDC", 0.0)),
     }
+
 
 def fetch_portfolio(quote_currency: str = None) -> Tuple[Dict[str, float], float]:
     """Updated to handle both USD and USDC. Values all in USD equivalent. Stables valued 1:1."""
@@ -101,6 +105,7 @@ def fetch_portfolio(quote_currency: str = None) -> Tuple[Dict[str, float], float
 
     return portfolio, round(total_value, 2)
 
+
 def get_open_orders(symbol: str = None) -> List[Dict]:
     """Fetch all open orders or for specific symbol."""
     exchange = get_kraken_exchange()
@@ -110,6 +115,7 @@ def get_open_orders(symbol: str = None) -> List[Dict]:
         print(f"❌ Error fetching open orders: {e}")
         return []
 
+
 def cancel_order(order_id: str, symbol: str = None) -> Dict:
     """Cancel specific order."""
     exchange = get_kraken_exchange()
@@ -118,6 +124,7 @@ def cancel_order(order_id: str, symbol: str = None) -> Dict:
     except Exception as e:
         print(f"❌ Failed to cancel order {order_id}: {e}")
         raise
+
 
 def cancel_all_open_orders(symbol: str = None) -> List:
     """Cancel all open orders (batch where possible)."""
@@ -131,7 +138,7 @@ def cancel_all_open_orders(symbol: str = None) -> List:
             cancelled = []
             for order in orders:
                 try:
-                    cancelled.append(cancel_order(order['id'], order.get('symbol')))
+                    cancelled.append(cancel_order(order["id"], order.get("symbol")))
                 except:
                     pass
             return cancelled
@@ -139,7 +146,10 @@ def cancel_all_open_orders(symbol: str = None) -> List:
         print(f"❌ Error cancelling all orders: {e}")
         return []
 
-def create_post_only_limit_order(symbol: str, side: str, amount: float, price: float, params: Dict = None) -> Dict:
+
+def create_post_only_limit_order(
+    symbol: str, side: str, amount: float, price: float, params: Dict = None
+) -> Dict:
     """Create post-only limit order to ensure maker fees only."""
     if params is None:
         params = {}
@@ -147,26 +157,35 @@ def create_post_only_limit_order(symbol: str, side: str, amount: float, price: f
     params["oflags"] = "post"
     exchange = get_kraken_exchange()
     try:
-        order = exchange.create_order(
-            symbol, "limit", side, amount, price, params
-        )
+        order = exchange.create_order(symbol, "limit", side, amount, price, params)
         return order
     except Exception as e:
         print(f"❌ Failed to create post-only {side} order for {symbol}: {e}")
         raise
 
-def edit_order(order_id: str, symbol: str, side: str, amount: float = None, price: float = None, params: Dict = None) -> Dict:
+
+def edit_order(
+    order_id: str,
+    symbol: str,
+    side: str,
+    amount: float = None,
+    price: float = None,
+    params: Dict = None,
+) -> Dict:
     """Edit an existing order (keep post-only)."""
     if params is None:
         params = {}
     params["oflags"] = "post"
     exchange = get_kraken_exchange()
     try:
-        order = exchange.edit_order(order_id, symbol, "limit", side, amount, price, params)
+        order = exchange.edit_order(
+            order_id, symbol, "limit", side, amount, price, params
+        )
         return order
     except Exception as e:
         print(f"❌ Failed to edit order {order_id}: {e}")
         raise
+
 
 def fetch_order(order_id: str) -> Dict:
     """Fetch status of a specific order."""
