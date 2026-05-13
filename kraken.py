@@ -86,3 +86,41 @@ def fetch_portfolio(quote_currency: str = None) -> Tuple[Dict[str, float], float
         total_value += value
 
     return portfolio, total_value
+
+# New functions for order management
+
+def fetch_open_orders(symbol: str = None) -> List[Dict]:
+    """Fetch open orders, optionally for a specific symbol."""
+    exchange = get_kraken_exchange()
+    return exchange.fetch_open_orders(symbol)
+
+def cancel_order(order_id: str, symbol: str = None) -> Dict:
+    """Cancel a specific order."""
+    exchange = get_kraken_exchange()
+    return exchange.cancel_order(order_id, symbol)
+
+def cancel_all_orders(symbol: str = None) -> List[Dict]:
+    """Cancel all open orders, optionally filtered by symbol."""
+    exchange = get_kraken_exchange()
+    return exchange.cancel_all_orders(symbol)
+
+def fetch_order_book(symbol: str, limit: int = 10) -> Dict:
+    """Fetch order book for price discovery."""
+    exchange = get_kraken_exchange()
+    return exchange.fetch_order_book(symbol, limit)
+
+def create_post_only_limit_order(symbol: str, side: str, amount: float, price: float, params: Dict = None) -> Dict:
+    """Create a post-only limit order to ensure maker fees."""
+    if params is None:
+        params = {}
+    exchange = get_kraken_exchange()
+    # Kraken specific for post-only
+    if 'kraken' in str(exchange.id).lower():
+        params.setdefault('oflags', 'post')
+    else:
+        params.setdefault('post_only', True)
+    
+    order = exchange.create_order(
+        symbol, 'limit', side, amount, price, params=params
+    )
+    return order
