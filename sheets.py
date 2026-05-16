@@ -104,6 +104,29 @@ def get_target_allocations() -> dict[str, float]:
     return targets
 
 
+def get_desired_cash_reserve() -> float:
+    """Return the desired cash reserve at cell I3 from the 'Signals' sheet.
+
+    The sheet cell I3 is expected to contain a numeric value representing the cash
+    reserve amount to hold outside of rebalancing.
+    """
+    spreadsheet_id = os.getenv("GOOGLE_DOCS_SHEET_ID")
+    if not spreadsheet_id:
+        raise ValueError("GOOGLE_DOCS_SHEET_ID not set in .env")
+
+    gc = get_gspread_client()
+    worksheet = gc.open_by_key(spreadsheet_id).worksheet("Signals")
+    value = worksheet.acell("I3").value
+
+    if value is None or value == "":
+        return 0.0
+
+    try:
+        return float(value)
+    except TypeError, ValueError:
+        raise ValueError(f"Expected a numeric reserve value in I3, got: {value!r}")
+
+
 def update_current_allocations_in_sheet():
     """Update the 'Current' column (Column E) in the Google Sheet with current USD values.
 
