@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Any
 import os
 from rebalancer import generate_rebalance_plan, execute_trades
+from sheets import update_current_allocations_in_sheet
 
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
@@ -47,6 +48,11 @@ async def health():
 )
 async def get_plan():
     return generate_rebalance_plan()
+
+
+@app.post("/updateCurrentAllocations", dependencies=[Depends(get_api_key)])
+async def update_current_allocations():
+    return update_current_allocations_in_sheet()
 
 
 @app.post("/rebalance/execute", dependencies=[Depends(get_api_key)])

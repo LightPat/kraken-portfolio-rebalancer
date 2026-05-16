@@ -19,11 +19,43 @@ USE_WEBHOOK = os.getenv("USE_WEBHOOK", "true").lower() == "true"
 TELEGRAM_WEBHOOK_URL = os.getenv("TELEGRAM_WEBHOOK_URL")
 TELEGRAM_WEBHOOK_PORT = int(os.getenv("TELEGRAM_WEBHOOK_PORT", "8443"))
 
+# Constants
+HTTP_TIMEOUT_SECONDS = 60.0
+CONNECT_TIMEOUT_SECONDS = 10.0
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Kraken Rebalancer ready!\n\nUse /rebalance to start."
+        "🤖 Kraken Rebalancer ready!\n\nUse /rebalance or /updateCurrentAllocations to start."
     )
+
+
+async def update_current_allocations_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    if update.effective_user.id != ALLOWED_USER_ID:
+        await update.message.reply_text("❌ Unauthorized")
+        return
+
+    status_message = await update.message.reply_text(
+        "🔄 Updating current allocations..."
+    )
+
+    try:
+        timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                f"{FASTAPI_URL}/updateCurrentAllocations",
+                headers={"X-API-Key": REBALANCER_API_KEY},
+            )
+            resp.raise_for_status()
+            result = resp.json()
+    except Exception as e:
+        await status_message.edit_text(f"❌ Execute failed: {type(e).__name__}: {e}")
+        return
+
+    result_text = "\n".join(result.get("results", ["No details returned"]))
+    await status_message.edit_text(f"🚀 Google sheet updated!\n\n{result_text}")
 
 
 async def rebalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -32,7 +64,7 @@ async def rebalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        timeout = httpx.Timeout(60.0, connect=10.0)
+        timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS)
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get(
                 f"{FASTAPI_URL}/rebalance/plan",
@@ -84,7 +116,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "confirm":
         await query.edit_message_text("🔄 Rebalance in progress...")
         try:
-            timeout = httpx.Timeout(60.0, connect=10.0)
+            timeout = httpx.Timeout(
+                HTTP_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS
+            )
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(
                     f"{FASTAPI_URL}/rebalance/execute",
@@ -104,6 +138,9 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(
+        CommandHandler("updateCurrentAllocations", update_current_allocations_command)
+    )
     app.add_handler(CommandHandler("rebalance", rebalance_command))
     app.add_handler(CallbackQueryHandler(button_callback))
 

@@ -1,6 +1,7 @@
 import os
 import json
 import gspread
+from kraken import fetch_portfolio
 from oauth2client.service_account import ServiceAccountCredentials
 
 # Global cached client
@@ -101,3 +102,62 @@ def get_target_allocations() -> dict[str, float]:
         print(f"⚠️  Warning: Target percentages sum to {total:.2f}, not 1.0")
 
     return targets
+
+
+def update_current_allocations_in_sheet():
+    """Update the 'Current' column (Column E) in the Google Sheet with current USD values.
+
+    For each asset listed in Column A (starting at row 8), this puts the total USD value
+    of your holdings (quantity x current price) into Column E.
+
+    Example:
+      - You hold 2 SOL and SOL price = $95.40 → cell gets 190.8 (raw number)
+      - Sheet can be formatted as Currency / Number with 2 decimals if desired.
+
+    Stops at the first empty row in Column A (same logic as get_target_allocations).
+    Uses the exact portfolio values returned by fetch_portfolio() (no extra API calls).
+    """
+    spreadsheet_id = os.getenv("GOOGLE_DOCS_SHEET_ID")
+    if not spreadsheet_id:
+        raise ValueError("GOOGLE_DOCS_SHEET_ID not set in .env")
+
+    # fetch_portfolio returns exactly what you asked for:
+    # ({'SOL': 190.8, 'BTC': 1234.56, ...}, total_value)
+    portfolio, total_value = fetch_portfolio()
+
+    gc = get_gspread_client()
+    worksheet = gc.open_by_key(spreadsheet_id).worksheet("Signals")
+
+    # Read only Column A (assets) – one lightweight API call
+    asset_rows = worksheet.get_values("A8:A")
+
+    # Collect values for Column D (one contiguous range update)
+    current_usd_values = []
+    for row in asset_rows:
+        if not row or not row[0]:
+            break  # stop at first empty asset row (matches get_target_allocations)
+
+        asset = str(row[0]).strip().upper()
+        usd_value = portfolio.get(asset, 0.0)  # 0.0 if we hold nothing
+        current_usd_values.append(
+            [usd_value]
+        )  # list-of-lists for gspread column update
+
+    results = []
+
+    if current_usd_values:
+        # Update the entire "Current" column in one batch
+        last_row = 7 + len(current_usd_values)
+        worksheet.update(
+            f"E8:E{last_row}",
+            current_usd_values,
+            value_input_option="RAW",  # keeps the value as a real number (not text)
+        )
+        results.append(
+            f"✅ Updated current USD values for {len(current_usd_values)} assets."
+        )
+        results.append(f"💰 Total portfolio value: ${total_value:,.2f}")
+    else:
+        results.append("⚠️ No assets found in the Signals sheet (starting at row 8).")
+
+    return {"results": results}
