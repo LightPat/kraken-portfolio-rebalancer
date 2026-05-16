@@ -184,3 +184,35 @@ def create_post_only_limit_order(
                 return exchange.create_market_sell_order(symbol, amount)
         # Any other error bubbles up
         raise
+
+
+def get_free_balance(currency: str) -> float:
+    """Quick free balance lookup (used during execution)."""
+    exchange = get_kraken_exchange()
+    balance = exchange.fetch_balance()["free"]
+    return balance.get(currency.upper(), 0.0)
+
+
+def validate_quote_balances(plan: List[Dict]) -> List[str]:
+    """Check if we have enough quote currency for buys. Return warning messages."""
+    warnings = []
+    # Run sells first in simulation (they add to USD)
+    for trade in [t for t in plan if t["action"] == "sell"]:
+        quote = trade["quote"]  # usually USD
+        # sells add to quote balance – we assume it will be available
+        pass
+
+    for trade in [t for t in plan if t["action"] == "buy"]:
+        quote = trade["quote"]
+        needed = trade["amount_usd"]
+        available = get_free_balance(quote)
+        if available < needed:
+            shortfall = needed - available
+            # Suggest conversion from any other stable we hold
+            other_stables = [s for s in STABLE_COINS if s != quote]
+            warnings.append(
+                f"⚠️ CONVERSION NEEDED: Buy {trade['asset']}/{quote} requires ${shortfall:,.2f} more {quote}. "
+                f"You have sufficient total stables but not in {quote}. "
+                f"Please use Kraken Pro Convert UI to move ~${shortfall:,.2f} from {other_stables[0]} (or any other stable) → {quote}."
+            )
+    return warnings

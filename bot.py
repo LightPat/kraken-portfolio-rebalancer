@@ -66,6 +66,8 @@ async def rebalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Unauthorized")
         return
 
+    status_message = await update.message.reply_text("🔄 Starting rebalance process...")
+
     try:
         timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS)
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -76,18 +78,28 @@ async def rebalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             resp.raise_for_status()
             data = resp.json()
     except Exception as e:
-        await update.message.reply_text(
+        await status_message.edit_text(
             f"❌ Failed to get plan: {type(e).__name__}: {e}"
         )
         return
 
-    plan_text = f"📊 **Rebalance Plan**\nTotal value: ${data['total_value_usd']}\n\n"
+    if not data["plan"]:
+        await status_message.edit_text("✅ Portfolio is already balanced!")
+        return
+
+    lines = [
+        "📊 Rebalance Plan",
+        f"• Total Portfolio Value: `${round(data.get('total_value_usd', 0), USD_DECIMALS)}`",
+        f"• Desired Cash Reserve: `${round(data.get('desired_reserve', 0), USD_DECIMALS)}`",
+        f"• Investable Value: `${round(data.get('investable_value', 0), USD_DECIMALS)}`",
+        f"• Current Stables (USD+USDC+USDG): `${round(data.get('current_stables_total', 0), USD_DECIMALS)}`",
+        "\n",
+    ]
+
+    plan_text = "\n".join(lines)
+
     for t in data["plan"]:
         plan_text += f"{t['action'].upper()} {round(t['amount_base'], CRYPTO_DECIMALS)} {t['asset']} (~${round(t['amount_usd'], USD_DECIMALS)})\n"
-
-    if not data["plan"]:
-        await update.message.reply_text("✅ Portfolio is already balanced!")
-        return
 
     keyboard = [
         [
@@ -97,7 +109,7 @@ async def rebalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(
+    await status_message.edit_text(
         f"{plan_text}\nDRY_RUN = {data['dry_run']}\n\nExecute these trades?",
         reply_markup=reply_markup,
     )
