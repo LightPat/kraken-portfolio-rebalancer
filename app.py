@@ -78,8 +78,11 @@ async def execute_rebalance():
         "status": "executed",
         "message": "Rebalance trades executed successfully.",
         "results": results,
-        "dry_run": plan_data["dry_run"],
         "total_value_usd": plan_data["total_value_usd"],
+        "desired_reserve": plan_data["desired_reserve"],
+        "investable_value": plan_data["investable_value"],
+        "current_stables_total": plan_data["current_stables_total"],
+        "dry_run": plan_data["dry_run"],
         "executed_plan": trade_plan,
         "plan_data": plan_data,
     }
