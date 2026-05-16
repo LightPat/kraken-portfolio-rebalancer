@@ -80,13 +80,15 @@ def fetch_portfolio() -> Tuple[Dict[str, float], float, Dict[str, float]]:
 
     # Collect symbols needed for valuation
     needed_symbols = []
+    asset_to_symbol = {}
     for currency, amount in balance.items():
-        if amount > 0:
-            currency_upper = currency.upper()
-
-            if not is_stable_coin(currency_upper):
-                symbol = f"{currency_upper}/{QUOTE_CURRENCY}"
+        if amount > 0 and not is_stable_coin(currency.upper()):
+            try:
+                symbol = get_best_trading_symbol(currency.upper())
                 needed_symbols.append(symbol)
+                asset_to_symbol[currency.upper()] = symbol
+            except Exception as e:
+                print(f"⚠️ Skipping {currency} - no trading pair found: {e}")
 
     # This is the dictionary of ASSET PAIR: PRICE
     # For example: 'BNB/USD': 652.02
@@ -106,7 +108,9 @@ def fetch_portfolio() -> Tuple[Dict[str, float], float, Dict[str, float]]:
             stable_breakdown[currency] = amount
             total_value += amount
         else:  # Non-stable asset
-            symbol = f"{currency}/{QUOTE_CURRENCY}"
+            symbol = asset_to_symbol.get(currency)
+            if not symbol:
+                continue
             price = prices.get(symbol)
             if price is None:
                 continue
@@ -196,23 +200,31 @@ def get_free_balance(currency: str) -> float:
 def validate_quote_balances(plan: List[Dict]) -> List[str]:
     """Check if we have enough quote currency for buys. Return warning messages."""
     warnings = []
-    # Run sells first in simulation (they add to USD)
-    for trade in [t for t in plan if t["action"] == "sell"]:
-        quote = trade["quote"]  # usually USD
-        # sells add to quote balance – we assume it will be available
-        pass
+    # Start with current free balances for stables only
+    exchange = get_kraken_exchange()
+    balance = exchange.fetch_balance()["free"]
+    projected = {s: balance.get(s, 0.0) for s in STABLE_COINS}
 
+    # 1. Simulate sells (add proceeds)
+    for trade in [t for t in plan if t["action"] == "sell"]:
+        quote = trade["quote"]
+        if quote in projected:
+            projected[quote] += trade[
+                "amount_usd"
+            ]  # approximate; real fill will be close
+
+    # 2. Check buys against projected balances
     for trade in [t for t in plan if t["action"] == "buy"]:
         quote = trade["quote"]
         needed = trade["amount_usd"]
-        available = get_free_balance(quote)
+        available = projected.get(quote, 0.0)
         if available < needed:
             shortfall = needed - available
             # Suggest conversion from any other stable we hold
             other_stables = [s for s in STABLE_COINS if s != quote]
             warnings.append(
                 f"⚠️ CONVERSION NEEDED: Buy {trade['asset']}/{quote} requires ${shortfall:,.2f} more {quote}. "
-                f"You have sufficient total stables but not in {quote}. "
-                f"Please use Kraken Pro Convert UI to move ~${shortfall:,.2f} from {other_stables[0]} (or any other stable) → {quote}."
+                f"You have sufficient total stables but not enough in {quote} after sells. "
+                f"Please use Kraken Pro → Convert to move ~${shortfall:,.2f} from {other_stables[0]} (or any other stable) → {quote}."
             )
     return warnings
