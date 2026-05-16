@@ -8,10 +8,10 @@ from kraken import (
     cancel_order,
     create_post_only_limit_order,
     get_safe_post_only_price,
-    QUOTE_CURRENCY,
     is_stable_coin,
     get_best_trading_symbol,
 )
+from bot import CRYPTO_DECIMALS, PRICE_DECIMALS
 
 
 def generate_rebalance_plan() -> Dict[str, Any]:
@@ -81,17 +81,16 @@ def execute_trades(plan: List[Dict]):
     # EXECUTE THE NEW PLAN WITH POST-ONLY LIMITS
     for trade in plan:
         try:
-            if dry_run:
-                limit_price = trade["price"]  # just for display
-                results.append(
-                    f"🧪 DRY-RUN: Would {trade['action']} {trade['amount_base']} "
-                    f"{trade['asset']} @ limit ~${limit_price} (POST-ONLY)"
-                )
-                continue
-
             # Fresh ticker -> safe post-only price
             ticker = exchange.fetch_ticker(trade["symbol"])
             limit_price = get_safe_post_only_price(ticker, trade["action"])
+
+            if dry_run:
+                results.append(
+                    f"🧪 DRY-RUN: Would {trade['action']} {round(trade['amount_base'], CRYPTO_DECIMALS)} "
+                    f"{trade['asset']} @ LIMIT ~${round(limit_price, PRICE_DECIMALS)}"
+                )
+                continue
 
             order = create_post_only_limit_order(
                 trade["symbol"],
@@ -101,8 +100,8 @@ def execute_trades(plan: List[Dict]):
             )
 
             results.append(
-                f"✅ {trade['action'].upper()} POST-ONLY LIMIT {trade['amount_base']} "
-                f"{trade['asset']} @ ~${limit_price} (ID: {order.get('id')})"
+                f"✅ {trade['action'].upper()} {round(trade['amount_base'], CRYPTO_DECIMALS)} "
+                f"{trade['asset']} @ LIMIT ~${round(limit_price, PRICE_DECIMALS)} (ID: {order.get('id')})"
             )
         except Exception as e:
             results.append(f"❌ Failed {trade['action']} {trade['asset']}: {e}")
