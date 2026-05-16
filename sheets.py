@@ -159,7 +159,7 @@ def update_current_allocations_in_sheet():
         results.append("⚠️ No assets found in the Signals sheet (starting at row 8).")
 
     # Update stable asset values
-    stable_rows = worksheet.get_values("J8:J")
+    stable_rows = worksheet.get_values("H8:H")
     current_stable_values = []
 
     for row in stable_rows:
@@ -176,7 +176,7 @@ def update_current_allocations_in_sheet():
         # Update the entire "Value" column in one batch
         last_row = 7 + len(current_stable_values)
         worksheet.update(
-            f"K8:K{last_row}",
+            f"I8:I{last_row}",
             current_stable_values,
             value_input_option="RAW",  # keeps the value as a real number (not text)
         )
