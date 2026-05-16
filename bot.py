@@ -22,11 +22,14 @@ TELEGRAM_WEBHOOK_PORT = int(os.getenv("TELEGRAM_WEBHOOK_PORT", "8443"))
 # Constants
 HTTP_TIMEOUT_SECONDS = 60.0
 CONNECT_TIMEOUT_SECONDS = 10.0
+CRYPTO_DECIMALS = 6
+USD_DECIMALS = 2
+PRICE_DECIMALS = 4
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Kraken Rebalancer ready!\n\nUse /rebalance or /updateCurrentAllocations to start."
+        "🤖 Kraken Rebalancer ready!\n\nCommands:\n/rebalance\n/updateCurrentAllocations"
     )
 
 
@@ -80,7 +83,7 @@ async def rebalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     plan_text = f"📊 **Rebalance Plan**\nTotal value: ${data['total_value_usd']}\n\n"
     for t in data["plan"]:
-        plan_text += f"{t['action'].upper()} {t['amount_base']} {t['asset']} (~${t['amount_usd']})\n"
+        plan_text += f"{t['action'].upper()} {round(t['amount_base'], CRYPTO_DECIMALS)} {t['asset']} (~${round(t['amount_usd'], USD_DECIMALS)})\n"
 
     if not data["plan"]:
         await update.message.reply_text("✅ Portfolio is already balanced!")

@@ -121,17 +121,16 @@ def update_current_allocations_in_sheet():
     if not spreadsheet_id:
         raise ValueError("GOOGLE_DOCS_SHEET_ID not set in .env")
 
-    # fetch_portfolio returns exactly what you asked for:
     # ({'SOL': 190.8, 'BTC': 1234.56, ...}, total_value)
-    portfolio, total_value = fetch_portfolio()
+    portfolio, total_value, stable_breakdown = fetch_portfolio()
 
     gc = get_gspread_client()
     worksheet = gc.open_by_key(spreadsheet_id).worksheet("Signals")
 
-    # Read only Column A (assets) – one lightweight API call
+    # Read only Column A (assets)
     asset_rows = worksheet.get_values("A8:A")
 
-    # Collect values for Column D (one contiguous range update)
+    # Collect values for Column E (one contiguous range update)
     current_usd_values = []
     for row in asset_rows:
         if not row or not row[0]:
@@ -156,8 +155,40 @@ def update_current_allocations_in_sheet():
         results.append(
             f"✅ Updated current USD values for {len(current_usd_values)} assets."
         )
-        results.append(f"💰 Total portfolio value: ${total_value:,.2f}")
     else:
         results.append("⚠️ No assets found in the Signals sheet (starting at row 8).")
+
+    # Update stable asset values
+    stable_rows = worksheet.get_values("H8:H")
+    current_stable_values = []
+
+    for row in stable_rows:
+        if not row or not row[0]:
+            break  # stop at first empty asset row
+
+        asset = str(row[0]).strip().upper()
+        usd_value = stable_breakdown.get(asset, 0.0)  # 0.0 if we hold nothing
+        current_stable_values.append(
+            [usd_value]
+        )  # list-of-lists for gspread column update
+
+    if current_stable_values:
+        # Update the entire "Value" column in one batch
+        last_row = 7 + len(current_stable_values)
+        worksheet.update(
+            f"I8:I{last_row}",
+            current_stable_values,
+            value_input_option="RAW",  # keeps the value as a real number (not text)
+        )
+        results.append(
+            f"✅ Updated values for {len(current_stable_values)} stable assets."
+        )
+    else:
+        results.append(
+            "⚠️ No stable assets found in the Signals sheet (starting at row 8)."
+        )
+
+    if current_usd_values and current_stable_values:
+        results.append(f"💰 Total portfolio value: ${total_value:,.2f}")
 
     return {"results": results}

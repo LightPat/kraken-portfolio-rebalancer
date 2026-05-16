@@ -8,13 +8,15 @@ from kraken import (
     cancel_order,
     create_post_only_limit_order,
     get_safe_post_only_price,
+    is_stable_coin,
+    get_best_trading_symbol,
 )
+from bot import CRYPTO_DECIMALS, PRICE_DECIMALS
 
 
 def generate_rebalance_plan() -> Dict[str, Any]:
-    quote = os.getenv("QUOTE_CURRENCY", "USDC").upper()
     exchange = get_kraken_exchange()
-    current_portfolio, total_value = fetch_portfolio(quote)
+    current_portfolio, total_value, stable_breakdown = fetch_portfolio()
     targets = get_target_allocations()
 
     plan: List[Dict] = []
@@ -25,11 +27,11 @@ def generate_rebalance_plan() -> Dict[str, Any]:
         current_usd = current_portfolio.get(asset, 0.0)
         delta_usd = target_usd - current_usd
 
-        if abs(delta_usd) < threshold or asset == quote:
+        if abs(delta_usd) < threshold or is_stable_coin(asset):
             continue
 
         try:
-            symbol = f"{asset}/{quote}"
+            symbol = get_best_trading_symbol(asset)
             ticker = exchange.fetch_ticker(symbol)
             price = ticker["last"]
             amount_base = abs(delta_usd / price)
@@ -38,9 +40,9 @@ def generate_rebalance_plan() -> Dict[str, Any]:
                 {
                     "asset": asset,
                     "action": "buy" if delta_usd > 0 else "sell",
-                    "amount_usd": round(delta_usd, 2),
-                    "amount_base": round(amount_base, 8),
-                    "price": round(price, 6),
+                    "amount_usd": delta_usd,
+                    "amount_base": amount_base,
+                    "price": price,
                     "symbol": symbol,
                 }
             )
@@ -48,10 +50,9 @@ def generate_rebalance_plan() -> Dict[str, Any]:
             print(f"❌ Could not create trade for {asset}: {e}")
 
     return {
-        "total_value_usd": round(total_value, 2),
-        "current_portfolio": {k: round(v, 2) for k, v in current_portfolio.items()},
+        "total_value_usd": total_value,
+        "current_portfolio": {k: v for k, v in current_portfolio.items()},
         "plan": plan,
-        "quote_currency": quote,
         "dry_run": os.getenv("DRY_RUN", "false").lower() == "true",
     }
 
@@ -80,17 +81,16 @@ def execute_trades(plan: List[Dict]):
     # EXECUTE THE NEW PLAN WITH POST-ONLY LIMITS
     for trade in plan:
         try:
-            if dry_run:
-                limit_price = trade["price"]  # just for display
-                results.append(
-                    f"🧪 DRY-RUN: Would {trade['action']} {trade['amount_base']} "
-                    f"{trade['asset']} @ limit ~${limit_price} (POST-ONLY)"
-                )
-                continue
-
             # Fresh ticker -> safe post-only price
             ticker = exchange.fetch_ticker(trade["symbol"])
             limit_price = get_safe_post_only_price(ticker, trade["action"])
+
+            if dry_run:
+                results.append(
+                    f"🧪 DRY-RUN: Would {trade['action']} {round(trade['amount_base'], CRYPTO_DECIMALS)} "
+                    f"{trade['asset']} @ LIMIT ~${round(limit_price, PRICE_DECIMALS)}"
+                )
+                continue
 
             order = create_post_only_limit_order(
                 trade["symbol"],
@@ -100,8 +100,8 @@ def execute_trades(plan: List[Dict]):
             )
 
             results.append(
-                f"✅ {trade['action'].upper()} POST-ONLY LIMIT {trade['amount_base']} "
-                f"{trade['asset']} @ ~${limit_price} (ID: {order.get('id')})"
+                f"✅ {trade['action'].upper()} {round(trade['amount_base'], CRYPTO_DECIMALS)} "
+                f"{trade['asset']} @ LIMIT ~${round(limit_price, PRICE_DECIMALS)} (ID: {order.get('id')})"
             )
         except Exception as e:
             results.append(f"❌ Failed {trade['action']} {trade['asset']}: {e}")
