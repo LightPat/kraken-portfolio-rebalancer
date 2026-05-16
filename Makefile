@@ -6,7 +6,7 @@ UV_CACHE_DIR=/var/cache/uv-rebalancer
 UV_PYTHON_INSTALL_DIR=/var/lib/uv-rebalancer/python
 
 # Client/Dev API
-dev-run-api:; set -a; source .env; set +a; dcli exec -- uv run uvicorn app:app --host 0.0.0.0 --port 8000
+dev-run-api:; set -a; source .env; set +a; dcli exec -- uv run uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 dev-run-bot:; set -a; source .env; set +a; dcli exec -- uv run bot.py
 dev-run-app:; set -a; source .env; set +a; dcli exec -- uv run app.py
 
