@@ -1,7 +1,9 @@
 import ccxt
 import os
-import time
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Set
+
+QUOTE_CURRENCY = "USD"
+STABLE_COINS: Set[str] = {"USD", "USDC", "USDG"}
 
 _exchange = None
 
@@ -18,6 +20,20 @@ def get_kraken_exchange():
             }
         )
     return _exchange
+
+
+def is_stable_coin(currency: str) -> bool:
+    return currency.upper() in STABLE_COINS
+
+
+def get_best_trading_symbol(asset: str) -> str:
+    """Prefer USD pair (higher volume). Fallback to other stables if pair doesn't exist."""
+    exchange = get_kraken_exchange()
+    for quote in [QUOTE_CURRENCY] + [q for q in STABLE_COINS if q != QUOTE_CURRENCY]:
+        symbol = f"{asset.upper()}/{quote}"
+        if symbol in exchange and exchange[symbol].get("active", False):
+            return symbol
+    raise ValueError(f"No active trading pair found for {asset} against any stablecoin")
 
 
 def fetch_tickers_batch(symbols: List[str]) -> Dict[str, float]:
@@ -46,11 +62,8 @@ def fetch_tickers_batch(symbols: List[str]) -> Dict[str, float]:
     return prices
 
 
-def fetch_portfolio(quote_currency: str = None) -> Tuple[Dict[str, float], float]:
-    """Returns {asset: value_in_quote}, total_value_in_quote"""
-    if quote_currency is None:
-        quote_currency = os.getenv("QUOTE_CURRENCY", "USDC").upper()
-
+def fetch_portfolio() -> Tuple[Dict[str, float], float, Dict[str, float]]:
+    """Returns {asset: value_in_usd}, total_value_in_usd, {stable_coin: amount}"""
     exchange = get_kraken_exchange()
     # This is the dictionary of ASSET: CURRENT BALANCE
     # For example: 'BNB': 8.62915588
@@ -61,8 +74,9 @@ def fetch_portfolio(quote_currency: str = None) -> Tuple[Dict[str, float], float
     for currency, amount in balance.items():
         if amount > 0:
             currency_upper = currency.upper()
-            if currency_upper != quote_currency:
-                symbol = f"{currency_upper}/{quote_currency}"
+
+            if not is_stable_coin(currency_upper):
+                symbol = f"{currency_upper}/{QUOTE_CURRENCY}"
                 needed_symbols.append(symbol)
 
     # This is the dictionary of ASSET PAIR: PRICE
@@ -71,26 +85,27 @@ def fetch_portfolio(quote_currency: str = None) -> Tuple[Dict[str, float], float
 
     portfolio: Dict[str, float] = {}
     total_value = 0.0
+    stable_breakdown: Dict[str, float] = {s: 0.0 for s in STABLE_COINS}
 
     for currency, amount in balance.items():
         if amount <= 0:
             continue
         currency = currency.upper()
 
-        if currency == quote_currency:
-            portfolio[currency] = amount
+        if is_stable_coin(currency):
+            # Stables valued at par due to fee free conversions in the UI
+            stable_breakdown[currency] = amount
             total_value += amount
-            continue
+        else:  # Non-stable asset
+            symbol = f"{currency}/{QUOTE_CURRENCY}"
+            price = prices.get(symbol)
+            if price is None:
+                continue
+            value = amount * price
+            portfolio[currency] = value
+            total_value += value
 
-        symbol = f"{currency}/{quote_currency}"
-        price = prices.get(symbol)
-        if price is None:
-            continue
-        value = amount * price
-        portfolio[currency] = value
-        total_value += value
-
-    return portfolio, total_value
+    return portfolio, total_value, stable_breakdown
 
 
 def get_open_orders(symbols: List[str] | None = None) -> List[Dict]:

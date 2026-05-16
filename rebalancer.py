@@ -8,13 +8,13 @@ from kraken import (
     cancel_order,
     create_post_only_limit_order,
     get_safe_post_only_price,
+    QUOTE_CURRENCY,
 )
 
 
 def generate_rebalance_plan() -> Dict[str, Any]:
-    quote = os.getenv("QUOTE_CURRENCY", "USDC").upper()
     exchange = get_kraken_exchange()
-    current_portfolio, total_value = fetch_portfolio(quote)
+    current_portfolio, total_value, stable_breakdown = fetch_portfolio()
     targets = get_target_allocations()
 
     plan: List[Dict] = []
@@ -25,11 +25,11 @@ def generate_rebalance_plan() -> Dict[str, Any]:
         current_usd = current_portfolio.get(asset, 0.0)
         delta_usd = target_usd - current_usd
 
-        if abs(delta_usd) < threshold or asset == quote:
+        if abs(delta_usd) < threshold or asset == QUOTE_CURRENCY:
             continue
 
         try:
-            symbol = f"{asset}/{quote}"
+            symbol = f"{asset}/{QUOTE_CURRENCY}"
             ticker = exchange.fetch_ticker(symbol)
             price = ticker["last"]
             amount_base = abs(delta_usd / price)
@@ -51,7 +51,6 @@ def generate_rebalance_plan() -> Dict[str, Any]:
         "total_value_usd": round(total_value, 2),
         "current_portfolio": {k: round(v, 2) for k, v in current_portfolio.items()},
         "plan": plan,
-        "quote_currency": quote,
         "dry_run": os.getenv("DRY_RUN", "false").lower() == "true",
     }
 

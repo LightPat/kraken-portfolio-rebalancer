@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
-from typing import List, Dict, Any
 import os
 from rebalancer import generate_rebalance_plan, execute_trades
 from sheets import update_current_allocations_in_sheet
@@ -34,7 +33,6 @@ class PlanResponse(BaseModel):
     total_value_usd: float
     current_portfolio: dict
     plan: list
-    quote_currency: str
     dry_run: bool
 
 
@@ -69,7 +67,6 @@ async def execute_rebalance():
             "message": "Portfolio is already balanced according to targets.",
             "dry_run": plan_data["dry_run"],
             "total_value_usd": plan_data["total_value_usd"],
-            "quote_currency": plan_data["quote_currency"],
             "plan_data": plan_data,  # for debugging/logging
         }
 
