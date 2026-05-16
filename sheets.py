@@ -120,9 +120,9 @@ def _parse_sheet_numeric_value(val) -> float:
 
 
 def get_desired_cash_reserve() -> float:
-    """Return the desired cash reserve at cell I3 from the 'Signals' sheet.
+    """Return the desired cash reserve at cell B3 from the 'Signals' sheet.
 
-    The sheet cell I3 is expected to contain a numeric or currency-formatted value
+    The sheet cell B3 is expected to contain a numeric or currency-formatted value
     like '$860' or '860'.
     """
     spreadsheet_id = os.getenv("GOOGLE_DOCS_SHEET_ID")
@@ -131,7 +131,7 @@ def get_desired_cash_reserve() -> float:
 
     gc = get_gspread_client()
     worksheet = gc.open_by_key(spreadsheet_id).worksheet("Signals")
-    value = worksheet.acell("I3").value
+    value = worksheet.acell("B3").value
     return _parse_sheet_numeric_value(value)
 
 
