@@ -52,6 +52,8 @@ def fetch_portfolio(quote_currency: str = None) -> Tuple[Dict[str, float], float
         quote_currency = os.getenv("QUOTE_CURRENCY", "USDC").upper()
 
     exchange = get_kraken_exchange()
+    # This is the dictionary of ASSET: CURRENT BALANCE
+    # For example: 'BNB': 8.62915588
     balance = exchange.fetch_balance()["free"]
 
     # Collect symbols needed for valuation
@@ -63,6 +65,8 @@ def fetch_portfolio(quote_currency: str = None) -> Tuple[Dict[str, float], float
                 symbol = f"{currency_upper}/{quote_currency}"
                 needed_symbols.append(symbol)
 
+    # This is the dictionary of ASSET PAIR: PRICE
+    # For example: 'BNB/USD': 652.02
     prices = fetch_tickers_batch(needed_symbols)
 
     portfolio: Dict[str, float] = {}
