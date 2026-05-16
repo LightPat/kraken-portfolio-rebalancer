@@ -29,9 +29,18 @@ def is_stable_coin(currency: str) -> bool:
 def get_best_trading_symbol(asset: str) -> str:
     """Prefer USD pair (higher volume). Fallback to other stables if pair doesn't exist."""
     exchange = get_kraken_exchange()
+    # Ensure markets are loaded so we can safely inspect them
+    if not getattr(exchange, "markets", None):
+        try:
+            exchange.load_markets()
+        except Exception as e:
+            print(f"⚠️ Failed to load markets from exchange: {e}")
+
+    markets = getattr(exchange, "markets", {})
     for quote in [QUOTE_CURRENCY] + [q for q in STABLE_COINS if q != QUOTE_CURRENCY]:
         symbol = f"{asset.upper()}/{quote}"
-        if symbol in exchange and exchange[symbol].get("active", False):
+        # Use the markets mapping (dict) rather than testing membership on the exchange object
+        if symbol in markets and markets[symbol].get("active", False):
             return symbol
     raise ValueError(f"No active trading pair found for {asset} against any stablecoin")
 

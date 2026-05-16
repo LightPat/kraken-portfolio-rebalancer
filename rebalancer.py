@@ -9,6 +9,8 @@ from kraken import (
     create_post_only_limit_order,
     get_safe_post_only_price,
     QUOTE_CURRENCY,
+    is_stable_coin,
+    get_best_trading_symbol,
 )
 
 
@@ -25,11 +27,11 @@ def generate_rebalance_plan() -> Dict[str, Any]:
         current_usd = current_portfolio.get(asset, 0.0)
         delta_usd = target_usd - current_usd
 
-        if abs(delta_usd) < threshold or asset == QUOTE_CURRENCY:
+        if abs(delta_usd) < threshold or is_stable_coin(asset):
             continue
 
         try:
-            symbol = f"{asset}/{QUOTE_CURRENCY}"
+            symbol = get_best_trading_symbol(asset)
             ticker = exchange.fetch_ticker(symbol)
             price = ticker["last"]
             amount_base = abs(delta_usd / price)
@@ -38,9 +40,9 @@ def generate_rebalance_plan() -> Dict[str, Any]:
                 {
                     "asset": asset,
                     "action": "buy" if delta_usd > 0 else "sell",
-                    "amount_usd": round(delta_usd, 2),
-                    "amount_base": round(amount_base, 8),
-                    "price": round(price, 6),
+                    "amount_usd": delta_usd,
+                    "amount_base": amount_base,
+                    "price": price,
                     "symbol": symbol,
                 }
             )
@@ -48,8 +50,8 @@ def generate_rebalance_plan() -> Dict[str, Any]:
             print(f"❌ Could not create trade for {asset}: {e}")
 
     return {
-        "total_value_usd": round(total_value, 2),
-        "current_portfolio": {k: round(v, 2) for k, v in current_portfolio.items()},
+        "total_value_usd": total_value,
+        "current_portfolio": {k: v for k, v in current_portfolio.items()},
         "plan": plan,
         "dry_run": os.getenv("DRY_RUN", "false").lower() == "true",
     }

@@ -26,7 +26,7 @@ CONNECT_TIMEOUT_SECONDS = 10.0
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Kraken Rebalancer ready!\n\nUse /rebalance or /updateCurrentAllocations to start."
+        "🤖 Kraken Rebalancer ready!\n\nCommands:\n/rebalance\n/updateCurrentAllocations"
     )
 
 
