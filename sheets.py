@@ -104,11 +104,26 @@ def get_target_allocations() -> dict[str, float]:
     return targets
 
 
+def _parse_sheet_numeric_value(val) -> float:
+    """Parse a numeric value from a sheet cell, stripping currency formatting."""
+    if val is None or val == "":
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        cleaned = val.strip().replace("$", "").replace(",", "")
+        try:
+            return float(cleaned)
+        except ValueError:
+            raise ValueError(f"Expected a numeric reserve value in I3, got: {val!r}")
+    raise ValueError(f"Unsupported reserve cell type: {type(val).__name__}")
+
+
 def get_desired_cash_reserve() -> float:
     """Return the desired cash reserve at cell I3 from the 'Signals' sheet.
 
-    The sheet cell I3 is expected to contain a numeric value representing the cash
-    reserve amount to hold outside of rebalancing.
+    The sheet cell I3 is expected to contain a numeric or currency-formatted value
+    like '$860' or '860'.
     """
     spreadsheet_id = os.getenv("GOOGLE_DOCS_SHEET_ID")
     if not spreadsheet_id:
@@ -117,14 +132,7 @@ def get_desired_cash_reserve() -> float:
     gc = get_gspread_client()
     worksheet = gc.open_by_key(spreadsheet_id).worksheet("Signals")
     value = worksheet.acell("I3").value
-
-    if value is None or value == "":
-        return 0.0
-
-    try:
-        return float(value)
-    except TypeError, ValueError:
-        raise ValueError(f"Expected a numeric reserve value in I3, got: {value!r}")
+    return _parse_sheet_numeric_value(value)
 
 
 def update_current_allocations_in_sheet():
