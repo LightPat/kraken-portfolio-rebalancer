@@ -31,6 +31,9 @@ app = FastAPI(
 
 class PlanResponse(BaseModel):
     total_value_usd: float
+    desired_reserve: float
+    investable_value: float
+    current_stables_total: float
     current_portfolio: dict
     plan: list
     dry_run: bool
