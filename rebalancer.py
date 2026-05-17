@@ -231,8 +231,40 @@ def execute_trades(plan: List[Dict]):
         if timed_out_sells:
             _cancel_and_market_fallback(exchange, timed_out_sells, results)
 
+        # Re-calculate buys with actual post-sell balances
+        results.append(
+            "🔄 Re-calculating buy orders using actual post-sell portfolio..."
+        )
+        try:
+            fresh_rebalance = generate_rebalance_plan()
+            new_plan = fresh_rebalance.get("plan", [])
+
+            # Exclude any assets we just sold in this cycle
+            # (prevents immediate buy-backs due to tiny price drift)
+            sold_assets = {t.get("asset") for t in sells if t.get("asset")}
+
+            buys = [
+                t
+                for t in new_plan
+                if t.get("action") == "buy" and t.get("asset") not in sold_assets
+            ]
+
+            if buys:
+                results.append(
+                    f"📊 Recalculated {len(buys)} buy order(s) based on current balances and prices."
+                )
+            else:
+                results.append("✅ No buy orders needed after re-calculation.")
+        except Exception as e:
+            results.append(
+                f"⚠️ Failed to re-generate plan: {e}. Falling back to original buys."
+            )
+
     if not dry_run:
-        buy_warnings = validate_quote_balances(plan)
+        # Use the fresh plan (or the original if re-calc failed) for the final validation
+        buy_warnings = validate_quote_balances(
+            new_plan if "new_plan" in locals() else plan
+        )
         if buy_warnings:
             results.extend(buy_warnings)
             results.append(
