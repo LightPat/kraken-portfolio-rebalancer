@@ -219,5 +219,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Ignore lockfile used for synchronizing rebalancing operations
+# Ignore lockfile and flag file used for synchronizing rebalancing operations
 rebalance.lock
+cancel_rebalance.flag

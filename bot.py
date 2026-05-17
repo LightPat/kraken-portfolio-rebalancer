@@ -177,7 +177,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).concurrent_updates(True).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(

@@ -118,6 +118,13 @@ async def execute_rebalance():
         raise HTTPException(status_code=409, detail=message)
 
 
+@app.on_event("shutdown")
+async def shutdown_handler():
+    """Automatically cancel any running rebalance when you Ctrl+C the server."""
+    print("🛑 Server shutdown requested - cancelling running rebalance...")
+    request_cancel_rebalance()
+
+
 @app.post("/rebalance/cancel", dependencies=[Depends(get_api_key)])
 async def cancel_rebalance():
     request_cancel_rebalance()
