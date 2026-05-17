@@ -20,7 +20,7 @@ TELEGRAM_WEBHOOK_URL = os.getenv("TELEGRAM_WEBHOOK_URL")
 TELEGRAM_WEBHOOK_PORT = int(os.getenv("TELEGRAM_WEBHOOK_PORT", "8443"))
 
 # Constants
-HTTP_TIMEOUT_SECONDS = 60.0
+HTTP_TIMEOUT_SECONDS = 600.0
 CONNECT_TIMEOUT_SECONDS = 10.0
 CRYPTO_DECIMALS = 6
 USD_DECIMALS = 2
@@ -29,7 +29,7 @@ PRICE_DECIMALS = 4
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Kraken Rebalancer ready!\n\nCommands:\n/rebalance\n/updateCurrentAllocations"
+        "🤖 Kraken Rebalancer ready!\n\nCommands:\n/rebalance\n/cancelRebalance\n/updateCurrentAllocations"
     )
 
 
@@ -59,6 +59,33 @@ async def update_current_allocations_command(
 
     result_text = "\n".join(result.get("results", ["No details returned"]))
     await status_message.edit_text(f"🚀 Google sheet updated!\n\n{result_text}")
+
+
+async def cancel_rebalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER_ID:
+        await update.message.reply_text("❌ Unauthorized")
+        return
+
+    status_message = await update.message.reply_text(
+        "🛑 Sending cancel request to rebalance..."
+    )
+
+    try:
+        timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                f"{FASTAPI_URL}/rebalance/cancel",
+                headers={"X-API-Key": REBALANCER_API_KEY},
+            )
+            resp.raise_for_status()
+            result = resp.json()
+    except Exception as e:
+        await status_message.edit_text(
+            f"❌ Cancel request failed: {type(e).__name__}: {e}"
+        )
+        return
+
+    await status_message.edit_text(f"🛑 Cancel requested. {result.get('message', '')}")
 
 
 async def rebalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -157,6 +184,7 @@ def main():
         CommandHandler("updateCurrentAllocations", update_current_allocations_command)
     )
     app.add_handler(CommandHandler("rebalance", rebalance_command))
+    app.add_handler(CommandHandler("cancelRebalance", cancel_rebalance_command))
     app.add_handler(CallbackQueryHandler(button_callback))
 
     if USE_WEBHOOK and TELEGRAM_WEBHOOK_URL:

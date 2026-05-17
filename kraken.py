@@ -1,5 +1,8 @@
 import ccxt
 import os
+import time
+from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Tuple, Set
 
 QUOTE_CURRENCY = "USD"
@@ -195,6 +198,39 @@ def get_free_balance(currency: str) -> float:
     exchange = get_kraken_exchange()
     balance = exchange.fetch_balance()["free"]
     return balance.get(currency.upper(), 0.0)
+
+
+def get_order_remaining(order: Dict) -> float:
+    """Return the remaining base amount for an order, even if CCXT doesn't expose `remaining`."""
+    remaining = order.get("remaining")
+    if remaining is None:
+        amount = float(order.get("amount", 0.0) or 0.0)
+        filled = float(order.get("filled", 0.0) or 0.0)
+        remaining = max(0.0, amount - filled)
+    return float(remaining)
+
+
+def fetch_order(order_id: str, symbol: str) -> Dict | None:
+    """Refresh a single order by ID and symbol."""
+    exchange = get_kraken_exchange()
+    try:
+        return exchange.fetch_order(order_id, symbol)
+    except Exception as e:
+        print(f"⚠️ Failed to refresh order {order_id}: {e}")
+        return None
+
+
+def cancel_open_orders(symbols: List[str] | None = None) -> List[str]:
+    """Cancel all open orders, optionally filtered by a list of symbols."""
+    cancelled = []
+    orders = get_open_orders(symbols)
+    for order in orders:
+        try:
+            cancel_order(order["id"])
+            cancelled.append(order["id"])
+        except Exception as e:
+            print(f"⚠️ Failed to cancel open order {order.get('id')}: {e}")
+    return cancelled
 
 
 def validate_quote_balances(plan: List[Dict]) -> List[str]:

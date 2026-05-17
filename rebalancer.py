@@ -1,4 +1,5 @@
 import os
+import time
 from typing import List, Dict, Any
 from sheets import get_target_allocations, get_desired_cash_reserve
 from kraken import (
@@ -6,13 +7,35 @@ from kraken import (
     get_kraken_exchange,
     get_open_orders,
     cancel_order,
+    cancel_open_orders,
     create_post_only_limit_order,
     get_safe_post_only_price,
     is_stable_coin,
     get_best_trading_symbol,
     validate_quote_balances,
+    fetch_order,
+    get_order_remaining,
 )
 from bot import CRYPTO_DECIMALS, PRICE_DECIMALS
+
+ORDER_TIMEOUT_SECONDS = 300
+ORDER_POLL_INTERVAL_SECONDS = 12
+
+CANCEL_REBALANCE_REQUESTED = False
+
+
+def request_cancel_rebalance():
+    global CANCEL_REBALANCE_REQUESTED
+    CANCEL_REBALANCE_REQUESTED = True
+
+
+def reset_cancel_rebalance():
+    global CANCEL_REBALANCE_REQUESTED
+    CANCEL_REBALANCE_REQUESTED = False
+
+
+def is_rebalance_cancel_requested() -> bool:
+    return CANCEL_REBALANCE_REQUESTED
 
 
 def generate_rebalance_plan() -> Dict[str, Any]:
@@ -43,7 +66,7 @@ def generate_rebalance_plan() -> Dict[str, Any]:
                 {
                     "asset": asset,
                     "action": "buy" if delta_usd > 0 else "sell",
-                    "amount_usd": delta_usd,
+                    "amount_usd": abs(delta_usd),
                     "amount_base": amount_base,
                     "price": price,
                     "symbol": symbol,
@@ -65,40 +88,11 @@ def generate_rebalance_plan() -> Dict[str, Any]:
     }
 
 
-def execute_trades(plan: List[Dict]):
-    dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
-    exchange = get_kraken_exchange()
-    results = []
-
-    if not plan:
-        return results
-
-    # 1. Pre-check for conversion needs (after simulated sells)
-    conversion_warnings = validate_quote_balances(plan)
-    if conversion_warnings:
-        results.extend(conversion_warnings)
-        results.append(
-            "⏸️  Trades paused until conversions are done. Run /rebalance again after converting."
-        )
-        return results
-
-    # 2. ORDER MANAGEMENT: cancel any old orders that no longer matches the fresh plan
-    if not dry_run:
-        try:
-            open_orders = get_open_orders([t["symbol"] for t in plan])
-            for order in open_orders:
-                try:
-                    cancel_order(order["id"])
-                    results.append(f"🧹 Cancelled old order {order['id']}")
-                except Exception as ce:
-                    results.append(f"⚠️ Failed to cancel {order['id']}: {ce}")
-        except Exception as e:
-            results.append(f"⚠️ Order cleanup failed: {e}")
-
-    # 3. Execute: sells first, then buys
-    sells = [t for t in plan if t["action"] == "sell"]
-    buys = [t for t in plan if t["action"] == "buy"]
-    for trade in sells + buys:
+def _submit_trade_orders(
+    exchange, trades: List[Dict], dry_run: bool, results: List[str]
+) -> List[Dict]:
+    submitted_orders = []
+    for trade in trades:
         try:
             ticker = exchange.fetch_ticker(trade["symbol"])
             limit_price = get_safe_post_only_price(ticker, trade["action"])
@@ -115,7 +109,152 @@ def execute_trades(plan: List[Dict]):
             results.append(
                 f"✅ {trade['action'].upper()} {round(trade['amount_base'], CRYPTO_DECIMALS)} {trade['asset']} @ LIMIT ~${round(limit_price, PRICE_DECIMALS)} (ID: {order.get('id')})"
             )
+
+            submitted_orders.append(
+                {
+                    "order_id": order.get("id"),
+                    "symbol": trade["symbol"],
+                    "side": trade["action"],
+                    "amount_base": trade["amount_base"],
+                    "quote": trade["quote"],
+                    "asset": trade["asset"],
+                }
+            )
         except Exception as e:
             results.append(f"❌ Failed {trade['action']} {trade['asset']}: {e}")
+    return submitted_orders
+
+
+def _wait_for_order_completion(
+    exchange,
+    submitted_orders: List[Dict],
+    results: List[str],
+    timeout_seconds: int,
+    poll_interval_seconds: int,
+) -> List[Dict]:
+    if not submitted_orders:
+        return []
+
+    symbols = list({order["symbol"] for order in submitted_orders})
+    start_time = time.monotonic()
+
+    remaining_orders = [order.copy() for order in submitted_orders]
+    while time.monotonic() - start_time < timeout_seconds:
+        if is_rebalance_cancel_requested():
+            results.append(
+                "⏹️ Rebalance cancellation requested, stopping order monitoring."
+            )
+            return remaining_orders
+
+        open_orders = get_open_orders(symbols)
+        open_ids = {order["id"] for order in open_orders}
+        remaining_orders = [
+            order for order in remaining_orders if order["order_id"] in open_ids
+        ]
+
+        if not remaining_orders:
+            return []
+
+        time.sleep(poll_interval_seconds)
+
+    return remaining_orders
+
+
+def _cancel_and_market_fallback(exchange, orders: List[Dict], results: List[str]):
+    for order in orders:
+        if not order.get("order_id"):
+            continue
+
+        order_info = fetch_order(order["order_id"], order["symbol"]) or {}
+        remaining = get_order_remaining(order_info)
+        if remaining <= 0:
+            continue
+
+        try:
+            cancel_order(order["order_id"])
+            results.append(
+                f"⏳ Timed out: cancelled stale {order['side']} order for {order['asset']}."
+            )
+        except Exception as e:
+            results.append(f"⚠️ Failed to cancel stale order {order['order_id']}: {e}")
+
+        try:
+            if order["side"] == "buy":
+                market = exchange.create_market_buy_order(order["symbol"], remaining)
+            else:
+                market = exchange.create_market_sell_order(order["symbol"], remaining)
+            results.append(
+                f"🚀 MARKET {order['side'].upper()} for {order['asset']} remaining {round(remaining, CRYPTO_DECIMALS)} @ {order['symbol']} (ID: {market.get('id')})"
+            )
+        except Exception as e:
+            results.append(
+                f"❌ Failed market fallback for {order['asset']} ({order['symbol']}): {e}"
+            )
+
+
+def execute_trades(plan: List[Dict]):
+    dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
+    exchange = get_kraken_exchange()
+    results = []
+
+    if not plan:
+        return results
+
+    conversion_warnings = validate_quote_balances(plan)
+    if conversion_warnings:
+        results.extend(conversion_warnings)
+        results.append(
+            "⏸️ Trades paused until conversions are done. Run /rebalance again after converting."
+        )
+        return results
+
+    if not dry_run:
+        try:
+            cancelled = cancel_open_orders([t["symbol"] for t in plan])
+            for order_id in cancelled:
+                results.append(f"🧹 Cancelled existing order {order_id}")
+        except Exception as e:
+            results.append(f"⚠️ Order cleanup failed: {e}")
+
+    sells = [t for t in plan if t["action"] == "sell"]
+    buys = [t for t in plan if t["action"] == "buy"]
+
+    sell_orders = _submit_trade_orders(exchange, sells, dry_run, results)
+    if not dry_run:
+        timed_out_sells = _wait_for_order_completion(
+            exchange,
+            sell_orders,
+            results,
+            timeout_seconds=ORDER_TIMEOUT_SECONDS,
+            poll_interval_seconds=ORDER_POLL_INTERVAL_SECONDS,
+        )
+        if timed_out_sells:
+            _cancel_and_market_fallback(exchange, timed_out_sells, results)
+
+    if not dry_run:
+        buy_warnings = validate_quote_balances(plan)
+        if buy_warnings:
+            results.extend(buy_warnings)
+            results.append(
+                "⏸️ Aborting buy execution until stablecoin conversions are completed."
+            )
+            return results
+
+    buy_orders = _submit_trade_orders(exchange, buys, dry_run, results)
+    if not dry_run:
+        timed_out_buys = _wait_for_order_completion(
+            exchange,
+            buy_orders,
+            results,
+            timeout_seconds=ORDER_TIMEOUT_SECONDS,
+            poll_interval_seconds=ORDER_POLL_INTERVAL_SECONDS,
+        )
+        if timed_out_buys:
+            _cancel_and_market_fallback(exchange, timed_out_buys, results)
+
+    if is_rebalance_cancel_requested():
+        results.append(
+            "⏹️ Rebalance has been cancelled. No further trades will be placed."
+        )
 
     return results
