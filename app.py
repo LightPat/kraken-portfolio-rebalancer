@@ -58,16 +58,16 @@ async def health():
     return {"status": "ok"}
 
 
+@app.post("/updateCurrentAllocations", dependencies=[Depends(get_api_key)])
+async def update_current_allocations():
+    return update_current_allocations_in_sheet()
+
+
 @app.get(
     "/rebalance/plan", response_model=PlanResponse, dependencies=[Depends(get_api_key)]
 )
 async def get_plan():
     return generate_rebalance_plan()
-
-
-@app.post("/updateCurrentAllocations", dependencies=[Depends(get_api_key)])
-async def update_current_allocations():
-    return update_current_allocations_in_sheet()
 
 
 @app.post("/rebalance/execute", dependencies=[Depends(get_api_key)])

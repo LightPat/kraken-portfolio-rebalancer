@@ -29,7 +29,7 @@ PRICE_DECIMALS = 4
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Kraken Rebalancer ready!\n\nCommands:\n/rebalance\n/cancel_rebalance\n/updateCurrentAllocations"
+        "🤖 Kraken Rebalancer ready!\n\nCommands:\n/rebalance\n/cancelRebalance\n/updateCurrentAllocations"
     )
 
 
@@ -184,7 +184,7 @@ def main():
         CommandHandler("updateCurrentAllocations", update_current_allocations_command)
     )
     app.add_handler(CommandHandler("rebalance", rebalance_command))
-    app.add_handler(CommandHandler("cancel_rebalance", cancel_rebalance_command))
+    app.add_handler(CommandHandler("cancelRebalance", cancel_rebalance_command))
     app.add_handler(CallbackQueryHandler(button_callback))
 
     if USE_WEBHOOK and TELEGRAM_WEBHOOK_URL:
