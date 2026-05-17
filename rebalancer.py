@@ -46,7 +46,7 @@ def generate_rebalance_plan() -> Dict[str, Any]:
 
     investable_value = max(0.0, total_value - desired_reserve)
     plan: List[Dict] = []
-    threshold = 5.0  # ignore tiny trades
+    threshold = 15  # ignore tiny trades
 
     for asset, target_pct in targets.items():
         target_usd = target_pct * investable_value
