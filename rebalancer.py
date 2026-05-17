@@ -1,5 +1,6 @@
 import os
 import time
+from pathlib import Path
 from typing import List, Dict, Any
 from sheets import get_target_allocations, get_desired_cash_reserve
 from kraken import (
@@ -21,21 +22,22 @@ from bot import CRYPTO_DECIMALS, PRICE_DECIMALS
 ORDER_TIMEOUT_SECONDS = 300
 ORDER_POLL_INTERVAL_SECONDS = 3
 
-CANCEL_REBALANCE_REQUESTED = False
+CANCEL_FLAG_FILE = "cancel_rebalance.flag"
 
 
 def request_cancel_rebalance():
-    global CANCEL_REBALANCE_REQUESTED
-    CANCEL_REBALANCE_REQUESTED = True
+    Path(CANCEL_FLAG_FILE).touch(exist_ok=True)
 
 
 def reset_cancel_rebalance():
-    global CANCEL_REBALANCE_REQUESTED
-    CANCEL_REBALANCE_REQUESTED = False
+    try:
+        os.unlink(CANCEL_FLAG_FILE)
+    except FileNotFoundError:
+        pass
 
 
 def is_rebalance_cancel_requested() -> bool:
-    return CANCEL_REBALANCE_REQUESTED
+    return os.path.exists(CANCEL_FLAG_FILE)
 
 
 def generate_rebalance_plan() -> Dict[str, Any]:

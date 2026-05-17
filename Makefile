@@ -6,10 +6,10 @@ UV_CACHE_DIR=/var/cache/uv-rebalancer
 UV_PYTHON_INSTALL_DIR=/var/lib/uv-rebalancer/python
 
 # Client/Dev API
-dev-run-api:; set -a; source .env; set +a; dcli exec -- uv run uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+dev-run-api:; set -a; source .env; set +a; dcli exec -- uv run uvicorn app:app --host 0.0.0.0 --port 8000 --workers 2
 dev-run-bot:; set -a; source .env; set +a; dcli exec -- uv run bot.py
 dev-run-app:; set -a; source .env; set +a; dcli exec -- uv run app.py
 
 # Server side commands
-server-run-api:; sudo -u rebalancer bash -c 'set -a; source /etc/kraken-secrets/kraken.env; set +a; UV_CACHE_DIR=$(UV_CACHE_DIR) UV_PYTHON_INSTALL_DIR=$(UV_PYTHON_INSTALL_DIR) uv run uvicorn app:app --host 127.0.0.1 --port 8000'
+server-run-api:; sudo -u rebalancer bash -c 'set -a; source /etc/kraken-secrets/kraken.env; set +a; UV_CACHE_DIR=$(UV_CACHE_DIR) UV_PYTHON_INSTALL_DIR=$(UV_PYTHON_INSTALL_DIR) uv run uvicorn app:app --host 127.0.0.1 --port 8000 --workers 2'
 server-run-bot:; sudo -u rebalancer bash -c 'set -a; source /etc/kraken-secrets/kraken.env; set +a; UV_CACHE_DIR=$(UV_CACHE_DIR) UV_PYTHON_INSTALL_DIR=$(UV_PYTHON_INSTALL_DIR) uv run bot.py'

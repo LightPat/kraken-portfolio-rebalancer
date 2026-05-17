@@ -3,7 +3,6 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 import os
 import time
-import asyncio
 from pathlib import Path
 from filelock import FileLock, Timeout
 from rebalancer import (
@@ -92,7 +91,7 @@ async def execute_rebalance():
                     "plan_data": plan_data,
                 }
 
-            results = await asyncio.to_thread(execute_trades, trade_plan)
+            results = execute_trades(trade_plan)
             return {
                 "status": "executed",
                 "message": "Rebalance trades executed successfully.",
