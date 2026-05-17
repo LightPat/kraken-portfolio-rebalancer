@@ -238,7 +238,16 @@ def execute_trades(plan: List[Dict]):
         try:
             fresh_rebalance = generate_rebalance_plan()
             new_plan = fresh_rebalance.get("plan", [])
-            buys = [t for t in new_plan if t.get("action") == "buy"]
+
+            # Exclude any assets we just sold in this cycle
+            # (prevents immediate buy-backs due to tiny price drift)
+            sold_assets = {t.get("asset") for t in sells if t.get("asset")}
+
+            buys = [
+                t
+                for t in new_plan
+                if t.get("action") == "buy" and t.get("asset") not in sold_assets
+            ]
 
             if buys:
                 results.append(
