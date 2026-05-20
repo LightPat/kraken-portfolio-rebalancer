@@ -94,8 +94,13 @@ def get_target_allocations() -> dict[str, float]:
         # Parse percentage from column C, handling 'XX%' format
         pct_str = row[2] if len(row) > 2 else None
         pct = _parse_target_percentage(pct_str)
-        if pct > 0:
+        if pct >= 0:
             targets[asset] = pct
+        else:
+            print(
+                f"⚠️  Warning: Invalid target percentage '{pct_str}' for asset '{asset}' - defaulting to 0%"
+            )
+            targets[asset] = 0.0
 
     total = sum(targets.values())
     if abs(total - 1.0) > 0.02:
