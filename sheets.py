@@ -246,23 +246,20 @@ def parse_signal_update(text: str) -> Dict[str, Tuple[float, str]]:
         if asset == "CASH":
             continue  # Skip CASH completely
         pct = float(pct_str) / 100
-        dir_val = (direction or "Long").capitalize()  # ← now "Long" (not LONG)
+        dir_val = (direction or "Long").capitalize()
         targets[asset] = (pct, dir_val)
     return targets
 
 
 def update_targets_from_signal(signal_text: str) -> dict:
     """Parse signal and update (or append) target % in Google Sheet 'Signals' worksheet.
-    - Updates existing assets (Columns B+C).
-    - For NEW assets: full copyPaste of the row above (A:F) → preserves formulas in D & F,
-      ALL formatting, colors, borders, conditional formatting, etc.
-      Then overwrites only A:C with the new data.
-    - Column B = "Long" (capitalized as requested).
-    - Uses USER_ENTERED everywhere → no more leading ' backtick.
+    - If NO valid targets → treat as 100% CASH and zero out Column C for ALL existing assets.
+    - For NEW assets: full row copy (A:F) + explicitly fix Column D formula to =B2*C{row}
+      (copy-paste was auto-incrementing B3 → B2, so we force the correct reference).
+    - Column B stays "Long" (capitalized as requested).
+    - Uses USER_ENTERED everywhere → no backticks.
     """
     targets = parse_signal_update(signal_text)
-    if not targets:
-        return {"status": "error", "message": "No valid targets found in signal"}
 
     spreadsheet_id = os.getenv("GOOGLE_DOCS_SHEET_ID")
     if not spreadsheet_id:
@@ -271,7 +268,7 @@ def update_targets_from_signal(signal_text: str) -> dict:
     gc = get_gspread_client()
     worksheet = gc.open_by_key(spreadsheet_id).worksheet("Signals")
 
-    # Read current assets (Column A)
+    # Read current assets
     asset_rows = worksheet.get_values("A8:A")
     existing = {}  # asset -> row_index_1based
     for i, row in enumerate(asset_rows, start=8):
@@ -280,7 +277,21 @@ def update_targets_from_signal(signal_text: str) -> dict:
         asset = str(row[0]).strip().upper()
         existing[asset] = i
 
-    # Prepare updates
+    results = []
+
+    # === 100% CASH CASE (no targets found) ===
+    if not targets:
+        if existing:
+            zero_updates = []
+            for row_num in existing.values():
+                zero_updates.append({"range": f"C{row_num}", "values": [["0.0%"]]})
+            worksheet.batch_update(zero_updates, value_input_option="USER_ENTERED")
+            results.append(f"💰 100% CASH signal — zeroed {len(existing)} assets")
+        else:
+            results.append("💰 100% CASH signal — no assets to update")
+        return {"status": "success", "message": " | ".join(results), "targets": {}}
+
+    # === NORMAL CASE (assets in signal) ===
     updates = []
     new_rows_data = []
     for asset, (pct, direction) in targets.items():
@@ -293,7 +304,6 @@ def update_targets_from_signal(signal_text: str) -> dict:
         else:
             new_rows_data.append([asset, direction, pct_str])
 
-    results = []
     if updates:
         worksheet.batch_update(updates, value_input_option="USER_ENTERED")
         results.append(f"✅ Updated {len(updates)} existing assets")
@@ -323,14 +333,13 @@ def update_targets_from_signal(signal_text: str) -> dict:
                             "startColumnIndex": 0,
                             "endColumnIndex": 6,
                         },
-                        "pasteType": "PASTE_NORMAL",  # ← FIXED: this was the crash
+                        "pasteType": "PASTE_NORMAL",
                         "pasteOrientation": "NORMAL",
                     }
                 }
-                # Use spreadsheet.batch_update for structural requests like copyPaste
                 worksheet.spreadsheet.batch_update({"requests": [copy_request]})
 
-            # === Overwrite only A:C with new clean data ===
+            # === Overwrite A:C with new data ===
             asset_name, direction, pct_str = new_asset_data
             worksheet.update(
                 f"A{current_new_row}:C{current_new_row}",
@@ -338,8 +347,15 @@ def update_targets_from_signal(signal_text: str) -> dict:
                 value_input_option="USER_ENTERED",
             )
 
+            # === CRITICAL FIX: Force Column D to =B2*C{new_row} ===
+            worksheet.update(
+                f"D{current_new_row}",
+                [[f"=B2*C{current_new_row}"]],
+                value_input_option="USER_ENTERED",
+            )
+
         results.append(
-            f"✅ Added {len(new_rows_data)} new asset(s) with full row copy (A:F)"
+            f"✅ Added {len(new_rows_data)} new asset(s) with full row copy + fixed D formula"
         )
 
     total = sum(pct for pct, _ in targets.values())
