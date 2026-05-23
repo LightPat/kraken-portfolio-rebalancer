@@ -118,6 +118,18 @@ async def execute_rebalance():
         raise HTTPException(status_code=409, detail=message)
 
 
+class SignalUpdateRequest(BaseModel):
+    signal_text: str
+
+
+@app.post("/updateTargetsFromSignal", dependencies=[Depends(get_api_key)])
+async def update_targets_from_signal(data: SignalUpdateRequest):
+    """Parse Telegram signal message and update target allocations in Google Sheet."""
+    from sheets import update_targets_from_signal as update_func
+
+    return update_func(data.signal_text)
+
+
 @app.on_event("shutdown")
 async def shutdown_handler():
     """Automatically cancel any running rebalance when you Ctrl+C the server."""

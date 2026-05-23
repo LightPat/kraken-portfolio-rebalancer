@@ -6,6 +6,8 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 # CONFIG FROM ENV
@@ -176,6 +178,40 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"🚀 Rebalance executed!\n\n{result_text}")
 
 
+async def signal_update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Automatically parse any message containing a Portfolio Signal Update."""
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+
+    text = (update.message.text or update.message.caption or "").strip()
+    if "Portfolio Signal Update" not in text or "RSPS Signal:" not in text:
+        return  # not a signal message
+
+    status_message = await update.message.reply_text(
+        "🔄 Parsing signal & updating targets..."
+    )
+
+    try:
+        timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                f"{FASTAPI_URL}/updateTargetsFromSignal",
+                json={"signal_text": text},
+                headers={"X-API-Key": REBALANCER_API_KEY},
+            )
+            resp.raise_for_status()
+            result = resp.json()
+    except Exception as e:
+        await status_message.edit_text(
+            f"❌ Signal update failed: {type(e).__name__}: {e}"
+        )
+        return
+
+    await status_message.edit_text(
+        f"🚀 Signal processed!\n\n{result.get('message', 'Done')}"
+    )
+
+
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).concurrent_updates(True).build()
 
@@ -186,6 +222,9 @@ def main():
     app.add_handler(CommandHandler("rebalance", rebalance_command))
     app.add_handler(CommandHandler("cancelRebalance", cancel_rebalance_command))
     app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, signal_update_handler)
+    )
 
     if USE_WEBHOOK and TELEGRAM_WEBHOOK_URL:
         print(f"🤖 Telegram bot starting with **webhooks** → {TELEGRAM_WEBHOOK_URL}")
