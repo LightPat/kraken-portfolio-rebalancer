@@ -235,24 +235,30 @@ def update_current_allocations_in_sheet():
 def parse_signal_update(text: str) -> Dict[str, Tuple[float, str]]:
     """Parse the exact Telegram 'Portfolio Signal Update' format.
     Returns {ASSET: (target_pct_decimal, direction)} e.g. {'HYPE': (0.344, 'LONG')}
+    CASH lines are completely skipped.
     """
     # Matches lines like: - 34.4% HYPE LONG 🟢   or   - 17.3% CASH 💵
     pattern = r"-\s+([\d.]+)%\s+([A-Z0-9]+)(?:\s+(LONG|CASH))?"
     matches = re.findall(pattern, text, re.IGNORECASE)
     targets: Dict[str, Tuple[float, str]] = {}
     for pct_str, asset, direction in matches:
-        pct = float(pct_str) / 100
         asset = asset.strip().upper()
-        dir_val = (direction or ("CASH" if asset == "CASH" else "LONG")).upper()
+        if asset == "CASH":
+            continue  # Skip CASH completely
+        pct = float(pct_str) / 100
+        dir_val = (direction or "LONG").capitalize()
         targets[asset] = (pct, dir_val)
     return targets
 
 
 def update_targets_from_signal(signal_text: str) -> dict:
     """Parse signal and update (or append) target % in Google Sheet 'Signals' worksheet.
-    - Updates existing assets in Column C.
-    - Adds new assets as new rows at the bottom (before first empty row).
-    - Column A = asset, Column B = direction (LONG / CASH), Column C = "XX.X%" string.
+    - Updates existing assets (Columns B+C).
+    - For NEW assets: full copyPaste of the row above (A:F) → preserves formulas in D & F,
+      ALL formatting, colors, borders, conditional formatting, etc.
+      Then overwrites only A:C with the new data.
+    - Always forces Column B = "LONG" (all caps).
+    - Uses USER_ENTERED everywhere → no more leading ' backtick on percentages.
     """
     targets = parse_signal_update(signal_text)
     if not targets:
@@ -265,42 +271,77 @@ def update_targets_from_signal(signal_text: str) -> dict:
     gc = get_gspread_client()
     worksheet = gc.open_by_key(spreadsheet_id).worksheet("Signals")
 
-    # Read current assets (Column A) to know existing rows + where to append
+    # Read current assets (Column A)
     asset_rows = worksheet.get_values("A8:A")
-    existing = {}  # asset -> (row_index_1based, current_direction)
+    existing = {}  # asset -> row_index_1based
     for i, row in enumerate(asset_rows, start=8):
         if not row or not row[0]:
             break
         asset = str(row[0]).strip().upper()
-        existing[asset] = (i, None)  # we don't read B yet, but we can update it
+        existing[asset] = i
 
-    # Prepare batch updates (one API call)
+    # Prepare updates
     updates = []
-    new_rows = []
+    new_rows_data = []
     for asset, (pct, direction) in targets.items():
         pct_str = f"{pct * 100:.1f}%"
         if asset in existing:
-            row = existing[asset][0]
+            row = existing[asset]
             updates.append(
                 {"range": f"B{row}:C{row}", "values": [[direction, pct_str]]}
             )
         else:
-            new_rows.append([asset, direction, pct_str])
+            new_rows_data.append([asset, direction, pct_str])
 
+    print(updates)
     results = []
     if updates:
-        worksheet.batch_update(updates, value_input_option="RAW")
+        worksheet.batch_update(updates, value_input_option="USER_ENTERED")
         results.append(f"✅ Updated {len(updates)} existing assets")
 
-    if new_rows:
-        # Append at the first empty row (after last existing)
+    if new_rows_data:
         next_row = 8 + len(existing)
-        worksheet.update(
-            f"A{next_row}:C{next_row + len(new_rows) - 1}",
-            new_rows,
-            value_input_option="RAW",
+        last_existing_row = next_row - 1
+
+        for i, new_asset_data in enumerate(new_rows_data):
+            current_new_row = next_row + i
+
+            # === FULL ROW COPY (A:F) preserves formulas in D/F + all formatting ===
+            if last_existing_row >= 8:
+                copy_request = {
+                    "copyPaste": {
+                        "source": {
+                            "sheetId": worksheet.id,
+                            "startRowIndex": last_existing_row - 1,  # 0-based
+                            "endRowIndex": last_existing_row,
+                            "startColumnIndex": 0,  # Column A
+                            "endColumnIndex": 6,  # Up to Column F
+                        },
+                        "destination": {
+                            "sheetId": worksheet.id,
+                            "startRowIndex": current_new_row - 1,
+                            "endRowIndex": current_new_row,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 6,
+                        },
+                        "pasteType": "PASTE_ALL",
+                        "pasteOrientation": "NORMAL",
+                    }
+                }
+                print(copy_request)
+                worksheet.batch_update({"requests": [copy_request]})
+
+            # === Overwrite only A:C with new clean data (no backtick) ===
+            asset_name, direction, pct_str = new_asset_data
+            worksheet.update(
+                f"A{current_new_row}:C{current_new_row}",
+                [[asset_name, direction, pct_str]],
+                value_input_option="USER_ENTERED",
+            )
+
+        results.append(
+            f"✅ Added {len(new_rows_data)} new asset(s) with full row copy (A:F)"
         )
-        results.append(f"✅ Added {len(new_rows)} new asset(s)")
 
     total = sum(pct for pct, _ in targets.values())
     results.append(f"📊 New targets sum: {total:.1%} ({len(targets)} assets)")
