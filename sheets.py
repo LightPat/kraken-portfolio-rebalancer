@@ -234,7 +234,7 @@ def update_current_allocations_in_sheet():
 
 def parse_signal_update(text: str) -> Dict[str, Tuple[float, str]]:
     """Parse the exact Telegram 'Portfolio Signal Update' format.
-    Returns {ASSET: (target_pct_decimal, direction)} e.g. {'HYPE': (0.344, 'LONG')}
+    Returns {ASSET: (target_pct_decimal, direction)} e.g. {'HYPE': (0.344, 'Long')}
     CASH lines are completely skipped.
     """
     # Matches lines like: - 34.4% HYPE LONG 🟢   or   - 17.3% CASH 💵
@@ -246,7 +246,7 @@ def parse_signal_update(text: str) -> Dict[str, Tuple[float, str]]:
         if asset == "CASH":
             continue  # Skip CASH completely
         pct = float(pct_str) / 100
-        dir_val = (direction or "LONG").capitalize()
+        dir_val = (direction or "Long").capitalize()  # ← now "Long" (not LONG)
         targets[asset] = (pct, dir_val)
     return targets
 
@@ -257,8 +257,8 @@ def update_targets_from_signal(signal_text: str) -> dict:
     - For NEW assets: full copyPaste of the row above (A:F) → preserves formulas in D & F,
       ALL formatting, colors, borders, conditional formatting, etc.
       Then overwrites only A:C with the new data.
-    - Always forces Column B = "LONG" (all caps).
-    - Uses USER_ENTERED everywhere → no more leading ' backtick on percentages.
+    - Column B = "Long" (capitalized as requested).
+    - Uses USER_ENTERED everywhere → no more leading ' backtick.
     """
     targets = parse_signal_update(signal_text)
     if not targets:
@@ -293,7 +293,6 @@ def update_targets_from_signal(signal_text: str) -> dict:
         else:
             new_rows_data.append([asset, direction, pct_str])
 
-    print(updates)
     results = []
     if updates:
         worksheet.batch_update(updates, value_input_option="USER_ENTERED")
@@ -306,16 +305,16 @@ def update_targets_from_signal(signal_text: str) -> dict:
         for i, new_asset_data in enumerate(new_rows_data):
             current_new_row = next_row + i
 
-            # === FULL ROW COPY (A:F) preserves formulas in D/F + all formatting ===
+            # === FULL ROW COPY (A:F) preserves formulas + formatting ===
             if last_existing_row >= 8:
                 copy_request = {
                     "copyPaste": {
                         "source": {
                             "sheetId": worksheet.id,
-                            "startRowIndex": last_existing_row - 1,  # 0-based
+                            "startRowIndex": last_existing_row - 1,
                             "endRowIndex": last_existing_row,
-                            "startColumnIndex": 0,  # Column A
-                            "endColumnIndex": 6,  # Up to Column F
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 6,
                         },
                         "destination": {
                             "sheetId": worksheet.id,
@@ -324,14 +323,14 @@ def update_targets_from_signal(signal_text: str) -> dict:
                             "startColumnIndex": 0,
                             "endColumnIndex": 6,
                         },
-                        "pasteType": "PASTE_ALL",
+                        "pasteType": "PASTE_NORMAL",  # ← FIXED: this was the crash
                         "pasteOrientation": "NORMAL",
                     }
                 }
-                print(copy_request)
-                worksheet.batch_update({"requests": [copy_request]})
+                # Use spreadsheet.batch_update for structural requests like copyPaste
+                worksheet.spreadsheet.batch_update({"requests": [copy_request]})
 
-            # === Overwrite only A:C with new clean data (no backtick) ===
+            # === Overwrite only A:C with new clean data ===
             asset_name, direction, pct_str = new_asset_data
             worksheet.update(
                 f"A{current_new_row}:C{current_new_row}",
