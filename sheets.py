@@ -1,6 +1,8 @@
 import os
+import re
 import json
 import gspread
+from typing import Dict, Tuple
 from kraken import fetch_portfolio
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -228,3 +230,79 @@ def update_current_allocations_in_sheet():
         results.append(f"💰 Total portfolio value: ${total_value:,.2f}")
 
     return {"results": results}
+
+
+def parse_signal_update(text: str) -> Dict[str, Tuple[float, str]]:
+    """Parse the exact Telegram 'Portfolio Signal Update' format.
+    Returns {ASSET: (target_pct_decimal, direction)} e.g. {'HYPE': (0.344, 'LONG')}
+    """
+    # Matches lines like: - 34.4% HYPE LONG 🟢   or   - 17.3% CASH 💵
+    pattern = r"-\s+([\d.]+)%\s+([A-Z0-9]+)(?:\s+(LONG|CASH))?"
+    matches = re.findall(pattern, text, re.IGNORECASE)
+    targets: Dict[str, Tuple[float, str]] = {}
+    for pct_str, asset, direction in matches:
+        pct = float(pct_str) / 100
+        asset = asset.strip().upper()
+        dir_val = (direction or ("CASH" if asset == "CASH" else "LONG")).upper()
+        targets[asset] = (pct, dir_val)
+    return targets
+
+
+def update_targets_from_signal(signal_text: str) -> dict:
+    """Parse signal and update (or append) target % in Google Sheet 'Signals' worksheet.
+    - Updates existing assets in Column C.
+    - Adds new assets as new rows at the bottom (before first empty row).
+    - Column A = asset, Column B = direction (LONG / CASH), Column C = "XX.X%" string.
+    """
+    targets = parse_signal_update(signal_text)
+    if not targets:
+        return {"status": "error", "message": "No valid targets found in signal"}
+
+    spreadsheet_id = os.getenv("GOOGLE_DOCS_SHEET_ID")
+    if not spreadsheet_id:
+        raise ValueError("GOOGLE_DOCS_SHEET_ID not set in .env")
+
+    gc = get_gspread_client()
+    worksheet = gc.open_by_key(spreadsheet_id).worksheet("Signals")
+
+    # Read current assets (Column A) to know existing rows + where to append
+    asset_rows = worksheet.get_values("A8:A")
+    existing = {}  # asset -> (row_index_1based, current_direction)
+    for i, row in enumerate(asset_rows, start=8):
+        if not row or not row[0]:
+            break
+        asset = str(row[0]).strip().upper()
+        existing[asset] = (i, None)  # we don't read B yet, but we can update it
+
+    # Prepare batch updates (one API call)
+    updates = []
+    new_rows = []
+    for asset, (pct, direction) in targets.items():
+        pct_str = f"{pct * 100:.1f}%"
+        if asset in existing:
+            row = existing[asset][0]
+            updates.append(
+                {"range": f"B{row}:C{row}", "values": [[direction, pct_str]]}
+            )
+        else:
+            new_rows.append([asset, direction, pct_str])
+
+    results = []
+    if updates:
+        worksheet.batch_update(updates, value_input_option="RAW")
+        results.append(f"✅ Updated {len(updates)} existing assets")
+
+    if new_rows:
+        # Append at the first empty row (after last existing)
+        next_row = 8 + len(existing)
+        worksheet.update(
+            f"A{next_row}:C{next_row + len(new_rows) - 1}",
+            new_rows,
+            value_input_option="RAW",
+        )
+        results.append(f"✅ Added {len(new_rows)} new asset(s)")
+
+    total = sum(pct for pct, _ in targets.values())
+    results.append(f"📊 New targets sum: {total:.1%} ({len(targets)} assets)")
+
+    return {"status": "success", "message": " | ".join(results), "targets": targets}
