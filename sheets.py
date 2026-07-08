@@ -305,6 +305,20 @@ def update_targets_from_signal(signal_text: str) -> dict:
             new_rows_data.append([asset, direction, pct_str])
 
     if updates:
+        # === ZERO OUT ASSETS THAT DISAPPEARED FROM THIS SIGNAL ===
+        # Any asset that exists in the sheet but is no longer mentioned in the current signal
+        # should have its target percentage set to 0.0% so the rebalancer stops targeting it.
+        dropped_assets = set(existing.keys()) - set(targets.keys())
+        if dropped_assets:
+            zero_updates = []
+            for asset in dropped_assets:
+                row = existing[asset]
+                zero_updates.append({"range": f"C{row}", "values": [["0.0%"]]})
+            worksheet.batch_update(zero_updates, value_input_option="USER_ENTERED")
+            results.append(
+                f"✅ Zeroed {len(zero_updates)} dropped asset(s) from previous signal"
+            )
+
         worksheet.batch_update(updates, value_input_option="USER_ENTERED")
         results.append(f"✅ Updated {len(updates)} existing assets")
 
