@@ -304,6 +304,17 @@ def update_targets_from_signal(signal_text: str) -> dict:
         else:
             new_rows_data.append([asset, direction, pct_str])
 
+    # === ZERO OUT ASSETS THAT DISAPPEARED FROM THIS SIGNAL ===
+    # Always do this in the normal case, regardless of whether we updated any existing rows.
+    dropped_assets = set(existing.keys()) - set(targets.keys())
+    if dropped_assets:
+        zero_updates = []
+        for asset in dropped_assets:
+            row = existing[asset]
+            zero_updates.append({"range": f"C{row}", "values": [["0.0%"]]})
+        worksheet.batch_update(zero_updates, value_input_option="USER_ENTERED")
+        results.append(f"✅ Zeroed {len(zero_updates)} asset(s)")
+
     if updates:
         worksheet.batch_update(updates, value_input_option="USER_ENTERED")
         results.append(f"✅ Updated {len(updates)} existing assets")
