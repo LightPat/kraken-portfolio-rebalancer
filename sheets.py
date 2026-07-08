@@ -313,9 +313,7 @@ def update_targets_from_signal(signal_text: str) -> dict:
             row = existing[asset]
             zero_updates.append({"range": f"C{row}", "values": [["0.0%"]]})
         worksheet.batch_update(zero_updates, value_input_option="USER_ENTERED")
-        results.append(
-            f"✅ Zeroed {len(zero_updates)} dropped asset(s) from previous signal"
-        )
+        results.append(f"✅ Zeroed {len(zero_updates)} asset(s)")
 
     if updates:
         worksheet.batch_update(updates, value_input_option="USER_ENTERED")
