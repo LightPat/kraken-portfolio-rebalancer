@@ -74,11 +74,16 @@ def fetch_tickers_batch(symbols: List[str]) -> Dict[str, float]:
     return prices
 
 
-def fetch_portfolio() -> Tuple[Dict[str, float], float, Dict[str, float]]:
-    """Returns {asset: value_in_usd}, total_value_in_usd, {stable_coin: amount}"""
+def fetch_portfolio() -> Tuple[
+    Dict[str, float],
+    Dict[str, float],
+    Dict[str, float],
+    Dict[str, float],
+    float,
+    Dict[str, float],
+]:
+    """Return spot and margin values, account equity, and free stable balances."""
     exchange = get_kraken_exchange()
-    # This is the dictionary of ASSET: CURRENT BALANCE
-    # For example: 'BNB': 8.62915588
     balance = exchange.fetch_balance()["free"]
 
     # Collect symbols needed for valuation
@@ -97,9 +102,9 @@ def fetch_portfolio() -> Tuple[Dict[str, float], float, Dict[str, float]]:
     # For example: 'BNB/USD': 652.02
     prices = fetch_tickers_batch(needed_symbols)
 
-    portfolio: Dict[str, float] = {}
-    total_value = 0.0
+    spot_value_by_asset: Dict[str, float] = {}
     stable_breakdown: Dict[str, float] = {s: 0.0 for s in STABLE_COINS}
+    total_equity = 0.0
 
     for currency, amount in balance.items():
         if amount <= 0:
@@ -107,9 +112,8 @@ def fetch_portfolio() -> Tuple[Dict[str, float], float, Dict[str, float]]:
         currency = currency.upper()
 
         if is_stable_coin(currency):
-            # Stables valued at par due to fee free conversions in the UI
             stable_breakdown[currency] = amount
-            total_value += amount
+            total_equity += amount
         else:  # Non-stable asset
             symbol = asset_to_symbol.get(currency)
             if not symbol:
@@ -118,10 +122,158 @@ def fetch_portfolio() -> Tuple[Dict[str, float], float, Dict[str, float]]:
             if price is None:
                 continue
             value = amount * price
-            portfolio[currency] = value
-            total_value += value
+            spot_value_by_asset[currency] = value
+            total_equity += value
 
-    return portfolio, total_value, stable_breakdown
+    positions = fetch_margin_positions()
+    short_notional_by_asset: Dict[str, float] = {}
+    short_used_margin_by_asset: Dict[str, float] = {}
+    long_margin_notional_by_asset: Dict[str, float] = {}
+    for position in positions:
+        asset = position["asset"]
+        if position["side"] == "short":
+            short_notional_by_asset[asset] = (
+                short_notional_by_asset.get(asset, 0.0) + position["notional_usd"]
+            )
+            short_used_margin_by_asset[asset] = (
+                short_used_margin_by_asset.get(asset, 0.0)
+                + position["used_margin_usd"]
+            )
+        else:
+            long_margin_notional_by_asset[asset] = (
+                long_margin_notional_by_asset.get(asset, 0.0)
+                + position["notional_usd"]
+            )
+        total_equity += position["used_margin_usd"] + position["unrealized_pnl_usd"]
+
+    return (
+        spot_value_by_asset,
+        short_notional_by_asset,
+        short_used_margin_by_asset,
+        long_margin_notional_by_asset,
+        max(0.0, total_equity),
+        stable_breakdown,
+    )
+
+
+def fetch_margin_positions() -> List[Dict]:
+    """Return open Kraken spot-margin positions in normalized USD terms."""
+    exchange = get_kraken_exchange()
+    try:
+        positions = exchange.fetch_positions()
+    except (ccxt.NotSupported, AttributeError):
+        try:
+            exchange.load_markets()
+            response = exchange.privatePostOpenPositions(
+                {"docalcs": "true", "consolidation": "market"}
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "Failed to fetch Kraken spot-margin positions. Confirm the API key "
+                f"has account permissions and margin trading is enabled: {e}"
+            ) from e
+        raw_positions = response.get("result", [])
+        if isinstance(raw_positions, dict):
+            raw_positions = list(raw_positions.values())
+        positions = []
+        for raw_position in raw_positions:
+            symbol = exchange.safe_symbol(raw_position.get("pair"))
+            size_base = float(raw_position.get("vol") or 0.0)
+            entry_price = (
+                float(raw_position.get("cost") or 0.0) / size_base
+                if size_base
+                else 0.0
+            )
+            raw_side = raw_position.get("type")
+            if raw_side not in {"buy", "sell"}:
+                raise ValueError(
+                    f"Unexpected Kraken margin position side: {raw_side!r}"
+                )
+            side = "long" if raw_side == "buy" else "short"
+            positions.append(
+                {
+                    "info": raw_position,
+                    "symbol": symbol,
+                    "side": side,
+                    "contracts": size_base,
+                    "entryPrice": entry_price,
+                    "initialMargin": float(raw_position.get("margin") or 0.0),
+                    "unrealizedPnl": float(raw_position.get("net") or 0.0),
+                }
+            )
+    except Exception as e:
+        raise RuntimeError(
+            "Failed to fetch Kraken spot-margin positions. Confirm the API key has "
+            f"the required account permissions and margin trading is enabled: {e}"
+        ) from e
+
+    position_details = []
+    symbols = []
+    for position in positions:
+        info = position.get("info") or {}
+        size_base = float(position.get("contracts") or info.get("vol") or 0.0)
+        if size_base <= 0:
+            continue
+
+        symbol = position.get("symbol")
+        side = position.get("side")
+        if not symbol or side not in {"long", "short"}:
+            raise ValueError(f"Unexpected Kraken margin position: {position!r}")
+        entry_price = float(
+            position.get("entryPrice")
+            or (
+                float(info.get("cost") or 0.0) / size_base
+                if size_base
+                else 0.0
+            )
+        )
+        used_margin = float(
+            position.get("initialMargin") or info.get("margin") or 0.0
+        )
+        if used_margin <= 0:
+            raise RuntimeError(
+                f"Kraken did not return used margin for open position {symbol}"
+            )
+        position_details.append(
+            {
+                "asset": symbol.split("/")[0].upper(),
+                "symbol": symbol,
+                "side": side,
+                "size_base": size_base,
+                "entry_price": entry_price,
+                "used_margin_usd": used_margin,
+                "unrealized_pnl_usd": float(
+                    position.get("unrealizedPnl")
+                    if position.get("unrealizedPnl") is not None
+                    else info.get("net") or 0.0
+                ),
+            }
+        )
+        symbols.append(symbol)
+
+    prices = fetch_tickers_batch(list(dict.fromkeys(symbols)))
+    for position in position_details:
+        price = prices.get(position["symbol"])
+        if price is None or price <= 0:
+            raise RuntimeError(
+                f"Failed to fetch a valid price for open margin position "
+                f"{position['symbol']}"
+            )
+        position["mark_price"] = price
+        position["notional_usd"] = position["size_base"] * price
+        if position["entry_price"] <= 0:
+            raise RuntimeError(
+                f"Kraken did not return an entry price for margin position "
+                f"{position['symbol']}"
+            )
+        if position["unrealized_pnl_usd"] == 0.0:
+            sign = 1 if position["side"] == "long" else -1
+            position["unrealized_pnl_usd"] = (
+                sign
+                * (position["mark_price"] - position["entry_price"])
+                * position["size_base"]
+            )
+    return position_details
 
 
 def get_open_orders(symbols: List[str] | None = None) -> List[Dict]:
@@ -157,15 +309,87 @@ def get_safe_post_only_price(
         return round(bid * (1 + buffer_pct), 8)  # slightly above bid → posts
 
 
+def _margin_order_error(error: Exception) -> RuntimeError:
+    error_text = str(error).lower()
+    if isinstance(error, ccxt.InsufficientFunds) or any(
+        phrase in error_text
+        for phrase in ("insufficient funds", "insufficient margin", "not enough")
+    ):
+        reason = "Insufficient quote funds or margin collateral."
+    elif any(
+        phrase in error_text
+        for phrase in (
+            "permission",
+            "not permitted",
+            "margin disabled",
+            "margin is disabled",
+            "not enabled",
+        )
+    ):
+        reason = "Margin trading is disabled or the API key lacks margin permission."
+    else:
+        reason = "Kraken rejected the spot-margin order."
+    return RuntimeError(
+        f"{reason} Spot-margin leverage is fixed at 2x. "
+        f"Kraken returned: {error}"
+    )
+
+
+def _force_2x_leverage(params: Dict) -> None:
+    requested_leverage = params.get("leverage", 2)
+    try:
+        is_2x = float(requested_leverage) == 2
+    except (TypeError, ValueError):
+        is_2x = False
+    if not is_2x:
+        print(
+            f"⚠️ Refusing spot-margin leverage {requested_leverage!r}; "
+            "clamping to Kraken minimum 2x."
+        )
+    params["leverage"] = "2"
+
+
+def create_market_order(
+    symbol: str,
+    side: str,
+    amount: float,
+    margin: bool = False,
+    reduce_only: bool = False,
+) -> Dict:
+    """Place a market order, optionally as a 2x spot-margin order."""
+    exchange = get_kraken_exchange()
+    params = {}
+    if margin:
+        _force_2x_leverage(params)
+    if reduce_only:
+        params["reduceOnly"] = True
+
+    try:
+        return exchange.create_order(symbol, "market", side, amount, None, params)
+    except Exception as e:
+        if margin:
+            raise _margin_order_error(e) from e
+        raise
+
+
 def create_post_only_limit_order(
-    symbol: str, side: str, amount: float, price: float
+    symbol: str,
+    side: str,
+    amount: float,
+    price: float,
+    margin: bool = False,
+    reduce_only: bool = False,
 ) -> Dict:
     """
     Place a post-only limit order (maker fees).
     If the book shifted and it would cross, automatically fall back to market order.
     """
     exchange = get_kraken_exchange()
-    params = {"post_only": True}  # CCXT translates to Kraken's oflags='post'
+    params = {"postOnly": True}
+    if margin:
+        _force_2x_leverage(params)
+    if reduce_only:
+        params["reduceOnly"] = True
 
     try:
         order = exchange.create_order(symbol, "limit", side, amount, price, params)
@@ -178,18 +402,18 @@ def create_post_only_limit_order(
                 "post only",
                 "would cross",
                 "immediately match",
-                "order rejected",
                 "postonly",
             ]
         ):
             print(
                 f"⚠️ Post-only {side} for {symbol} failed (book shift) → falling back to MARKET"
             )
-            if side == "buy":
-                return exchange.create_market_buy_order(symbol, amount)
-            else:
-                return exchange.create_market_sell_order(symbol, amount)
+            return create_market_order(
+                symbol, side, amount, margin=margin, reduce_only=reduce_only
+            )
         # Any other error bubbles up
+        if margin:
+            raise _margin_order_error(e) from e
         raise
 
 
@@ -234,33 +458,50 @@ def cancel_open_orders(symbols: List[str] | None = None) -> List[str]:
 
 
 def validate_quote_balances(plan: List[Dict]) -> List[str]:
-    """Check if we have enough quote currency for buys. Return warning messages."""
+    """Check available quote funds for short collateral and spot buys."""
     warnings = []
     # Start with current free balances for stables only
     exchange = get_kraken_exchange()
     balance = exchange.fetch_balance()["free"]
     projected = {s: balance.get(s, 0.0) for s in STABLE_COINS}
 
-    # 1. Simulate sells (add proceeds)
-    for trade in [t for t in plan if t["action"] == "sell"]:
-        quote = trade["quote"]
-        if quote in projected:
-            projected[quote] += trade[
-                "amount_usd"
-            ]  # approximate; real fill will be close
+    for position in fetch_margin_positions():
+        quote = position["symbol"].split("/")[1].upper()
+        if position["side"] == "short" and quote in projected:
+            short_proceeds = position["entry_price"] * position["size_base"]
+            projected[quote] = max(0.0, projected[quote] - short_proceeds)
 
-    # 2. Check buys against projected balances
-    for trade in [t for t in plan if t["action"] == "buy"]:
+    # Only spot long reductions add quote funds. Margin short sale proceeds are
+    # collateral for that short and are never available to fund another action.
+    for trade in plan:
+        if trade["action"] in {"reduce_long", "close_long", "sell"} and not trade.get(
+            "margin", False
+        ):
+            quote = trade["quote"]
+            if quote in projected:
+                projected[quote] += trade["amount_usd"]
+
+    for trade in plan:
         quote = trade["quote"]
-        needed = trade["amount_usd"]
+        if trade["action"] in {"cover_short", "reduce_short"}:
+            needed = trade["amount_usd"]
+        elif trade["action"] in {"open_short", "increase_short"}:
+            needed = trade["capital_usd"]
+        elif trade["action"] in {"open_long", "increase_long", "buy"}:
+            needed = trade["amount_usd"]
+        else:
+            continue
+
         available = projected.get(quote, 0.0)
         if available < needed:
             shortfall = needed - available
-            # Suggest conversion from any other stable we hold
-            other_stables = [s for s in STABLE_COINS if s != quote]
             warnings.append(
-                f"⚠️ CONVERSION NEEDED: Buy {trade['asset']}/{quote} requires ${shortfall:,.2f} more {quote}. "
-                f"You have sufficient total stables but not enough in {quote} after sells. "
-                f"Please use Kraken Pro → Convert to move ~${shortfall:,.2f} from {other_stables[0]} (or any other stable) → {quote}."
+                f"⚠️ CONVERSION NEEDED: {trade['action'].replace('_', ' ')} "
+                f"{trade['asset']}/{quote} requires ${shortfall:,.2f} more {quote}. "
+                f"Only ${available:,.2f} {quote} is available after reserving "
+                "existing short proceeds and required margin capital. Fund the "
+                "quote balance or convert from another stablecoin if needed."
             )
+        else:
+            projected[quote] -= needed
     return warnings

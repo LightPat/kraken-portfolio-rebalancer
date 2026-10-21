@@ -2,12 +2,17 @@ import os
 import re
 import json
 import gspread
-from typing import Dict, Tuple
+from typing import Dict, Tuple, TypedDict
 from kraken import fetch_portfolio
 from oauth2client.service_account import ServiceAccountCredentials
 
 # Global cached client
 _gspread_client = None
+
+
+class TargetAllocation(TypedDict):
+    pct: float
+    direction: str
 
 
 def get_gspread_client():
@@ -63,13 +68,14 @@ def _parse_target_percentage(val) -> float:
     return 0.0
 
 
-def get_target_allocations() -> dict[str, float]:
-    """Return {ASSET: target_percentage} from Google Sheet.
+def get_target_allocations() -> dict[str, TargetAllocation]:
+    """Return {ASSET: {pct, direction}} from Google Sheet.
 
-    Expects rows like ['BTC', 'Long', '0.0%'] or ['ETH', 'Long', '40%'] starting from row 8 in "Signals" sheet.
+    Expects rows like ['BTC', 'Long', '0.0%'] or ['ETH', 'Short', '25%']
+    starting from row 8 in "Signals" sheet.
     - Column A: Asset
-    - Column B: Direction (e.g. Long) - ignored for now
-    - Column C: Target percentage string like '0.0%' or '40%'
+    - Column B: Direction (Long or Short)
+    - Column C: Positive target percentage
     Stops at the first empty row in Column A.
     Percentages converted to decimal (0.0 - 1.0).
     """
@@ -83,9 +89,8 @@ def get_target_allocations() -> dict[str, float]:
     # Fetch only the needed columns starting at row 8 (one API call)
     values = worksheet.get_values("A8:C")
 
-    targets = {}
-    for row in values:
-        # row[0] = Column A (Asset), row[2] = Column C (Percentage)
+    targets: dict[str, TargetAllocation] = {}
+    for row_number, row in enumerate(values, start=8):
         if not row or len(row) == 0:
             break
 
@@ -93,20 +98,22 @@ def get_target_allocations() -> dict[str, float]:
         if not asset:
             break  # Stop at the first empty asset row (as requested)
 
-        # Parse percentage from column C, handling 'XX%' format
+        direction_raw = str(row[1] if len(row) > 1 else "").strip().lower()
+        direction = "Short" if direction_raw == "short" else "Long"
+
         pct_str = row[2] if len(row) > 2 else None
         pct = _parse_target_percentage(pct_str)
-        if pct >= 0:
-            targets[asset] = pct
-        else:
+        if pct < 0:
             print(
-                f"⚠️  Warning: Invalid target percentage '{pct_str}' for asset '{asset}' - defaulting to 0%"
+                f"⚠️  Warning: Negative target percentage '{pct_str}' for "
+                f"asset '{asset}' in row {row_number} - setting to 0%"
             )
-            targets[asset] = 0.0
+            pct = 0.0
+        targets[asset] = {"pct": pct, "direction": direction}
 
-    total = sum(targets.values())
+    total = sum(target["pct"] for target in targets.values())
     if abs(total - 1.0) > 0.02:
-        print(f"⚠️  Warning: Target percentages sum to {total:.2f}, not 1.0")
+        print(f"⚠️  Warning: Long + Short capital allocations sum to {total:.2f}, not 1.0")
 
     return targets
 
@@ -143,24 +150,33 @@ def get_desired_cash_reserve() -> float:
 
 
 def update_current_allocations_in_sheet():
-    """Update the 'Current' column (Column E) in the Google Sheet with current USD values.
+    """Update Column E with signed current allocation capital in USD.
 
-    For each asset listed in Column A (starting at row 8), this puts the total USD value
-    of your holdings (quantity x current price) into Column E.
+    Spot holdings are positive; short positions are negative used margin.
 
     Example:
       - You hold 2 SOL and SOL price = $95.40 → cell gets 190.8 (raw number)
+      - A $15,000 short using $7,500 margin → cell gets -7500
       - Sheet can be formatted as Currency / Number with 2 decimals if desired.
 
     Stops at the first empty row in Column A (same logic as get_target_allocations).
-    Uses the exact portfolio values returned by fetch_portfolio() (no extra API calls).
+    Uses the portfolio values returned by fetch_portfolio().
     """
     spreadsheet_id = os.getenv("GOOGLE_DOCS_SHEET_ID")
     if not spreadsheet_id:
         raise ValueError("GOOGLE_DOCS_SHEET_ID not set in .env")
 
-    # ({'SOL': 190.8, 'BTC': 1234.56, ...}, total_value)
-    portfolio, total_value, stable_breakdown = fetch_portfolio()
+    (
+        spot_value_by_asset,
+        _,
+        short_used_margin_by_asset,
+        _,
+        total_value,
+        stable_breakdown,
+    ) = fetch_portfolio()
+    current_values = dict(spot_value_by_asset)
+    for asset, used_margin in short_used_margin_by_asset.items():
+        current_values[asset] = current_values.get(asset, 0.0) - used_margin
 
     gc = get_gspread_client()
     worksheet = gc.open_by_key(spreadsheet_id).worksheet("Signals")
@@ -175,7 +191,7 @@ def update_current_allocations_in_sheet():
             break  # stop at first empty asset row (matches get_target_allocations)
 
         asset = str(row[0]).strip().upper()
-        usd_value = portfolio.get(asset, 0.0)  # 0.0 if we hold nothing
+        usd_value = current_values.get(asset, 0.0)  # 0.0 if we hold nothing
         current_usd_values.append(
             [usd_value]
         )  # list-of-lists for gspread column update
