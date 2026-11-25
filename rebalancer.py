@@ -17,6 +17,7 @@ from kraken import (
     get_best_trading_symbol,
     validate_quote_balances,
     _quote_currency,
+    _margin_symbol,
     fetch_order,
     get_order_remaining,
 )
@@ -285,6 +286,9 @@ def _submit_trade_orders(
                 "close_long": "sell",
             }[trade["action"]]
             margin = trade["action"] in SHORT_ACTIONS
+            order_symbol = (
+                _margin_symbol(trade["symbol"]) if margin else trade["symbol"]
+            )
             reduce_only = trade["action"] in {"reduce_short", "cover_short"}
             limit_price = get_safe_post_only_price(ticker, side)
             amount_base = trade["amount_base"]
@@ -326,7 +330,7 @@ def _submit_trade_orders(
             submitted_orders.append(
                 {
                     "order_id": order.get("id"),
-                    "symbol": trade["symbol"],
+                    "symbol": order_symbol,
                     "side": side,
                     "amount_base": amount_base,
                     "quote": trade["quote"],
@@ -380,8 +384,12 @@ def _cancel_and_market_fallback(orders: List[Dict], results: List[str]):
         if not order.get("order_id"):
             continue
 
-        order_info = fetch_order(order["order_id"], order["symbol"]) or {}
-        remaining = get_order_remaining(order_info)
+        order_info = fetch_order(order["order_id"], order["symbol"])
+        remaining = (
+            get_order_remaining(order_info)
+            if order_info
+            else order["amount_base"]
+        )
         if remaining <= 0:
             continue
 
@@ -422,7 +430,17 @@ def execute_trades(plan: List[Dict]):
 
     if not dry_run:
         try:
-            cancelled = cancel_open_orders([t["symbol"] for t in plan])
+            symbols = list(
+                dict.fromkeys(
+                    symbol
+                    for trade in plan
+                    for symbol in (
+                        trade["symbol"],
+                        _margin_symbol(trade["symbol"]),
+                    )
+                )
+            )
+            cancelled = cancel_open_orders(symbols)
             for order_id in cancelled:
                 results.append(f"🧹 Cancelled existing order {order_id}")
         except Exception as e:
