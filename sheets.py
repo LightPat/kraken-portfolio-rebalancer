@@ -152,13 +152,13 @@ def get_desired_cash_reserve() -> float:
 
 
 def update_current_allocations_in_sheet():
-    """Update Column E with signed current allocation capital in USD.
+    """Update Column E with current allocation capital in USD.
 
-    Spot holdings are positive; short positions are negative used margin.
+    Spot holdings and short used margin are both positive.
 
     Example:
       - You hold 2 SOL and SOL price = $95.40 → cell gets 190.8 (raw number)
-      - A $15,000 short using $7,500 margin → cell gets -7500
+      - A $15,000 short using $7,500 margin → cell gets 7500
       - Sheet can be formatted as Currency / Number with 2 decimals if desired.
 
     Stops at the first empty row in Column A (same logic as get_target_allocations).
@@ -178,7 +178,7 @@ def update_current_allocations_in_sheet():
     ) = fetch_portfolio()
     current_values = dict(spot_value_by_asset)
     for asset, used_margin in short_used_margin_by_asset.items():
-        current_values[asset] = current_values.get(asset, 0.0) - used_margin
+        current_values[asset] = current_values.get(asset, 0.0) + used_margin
 
     gc = get_gspread_client()
     worksheet = gc.open_by_key(spreadsheet_id).worksheet("Signals")
