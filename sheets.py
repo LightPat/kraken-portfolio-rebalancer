@@ -59,10 +59,12 @@ def _parse_target_percentage(val) -> float:
         val = float(val)
         return val / 100 if val > 1 else val
     if isinstance(val, str):
-        val = val.strip().rstrip("%").strip()
+        s = val.strip()
+        has_percent = s.endswith("%")
+        s = s.rstrip("%").strip()
         try:
-            pct = float(val)
-            return pct / 100 if pct > 1 else pct
+            pct = float(s)
+            return pct / 100 if has_percent or pct > 1 else pct
         except ValueError:
             return 0.0
     return 0.0
