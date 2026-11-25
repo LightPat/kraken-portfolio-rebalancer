@@ -503,7 +503,9 @@ def execute_sdca_trade(
         sdca["cash_usd"], action, actual_quote_amount
     )
     update_sdca_cash_in_sheet(cash_usd)
-    update_current_allocations_in_sheet(sdca_btc_adjustment=btc_delta)
+    update_current_allocations_in_sheet(
+        sdca_btc_adjustment=btc_delta, force_cold_balance_refresh=True
+    )
 
     results.append(
         f"✅ SDCA {action.upper()} filled: {abs(btc_delta):.8f} BTC, "

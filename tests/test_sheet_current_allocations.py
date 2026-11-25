@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 
 from embit import bip32, networks
 from sheets import (
+    clear_btc_cold_balance_cache,
     get_btc_cold_balance,
     update_current_allocations_in_sheet,
     update_sdca_cash_in_sheet,
@@ -177,6 +178,107 @@ class SdcaSheetTests(unittest.TestCase):
             self.assertAlmostEqual(get_btc_cold_balance(), 0.000015)
 
         self.assertEqual(fetch.call_count, 25)
+
+    def test_back_to_back_allocation_refreshes_scan_blockchain_once(self):
+        account = bip32.HDKey.from_seed(bytes(range(16))).derive("m/84h/0h/0h")
+        xpub = account.to_public(
+            version=networks.NETWORKS["main"]["zpub"]
+        ).to_base58()
+        worksheet = Mock()
+        worksheet.get_values.return_value = []
+        client = Mock()
+        client.open_by_key.return_value.worksheet.return_value = worksheet
+        portfolio = ({}, {}, {}, {}, 0.0, {"USD": 0.0, "USDC": 0.0, "USDG": 0.0})
+        unused_address = {
+            "chain_stats": {
+                "funded_txo_sum": 0,
+                "spent_txo_sum": 0,
+                "tx_count": 0,
+            },
+            "mempool_stats": {
+                "funded_txo_sum": 0,
+                "spent_txo_sum": 0,
+                "tx_count": 0,
+            },
+        }
+
+        clear_btc_cold_balance_cache()
+        try:
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "GOOGLE_DOCS_SHEET_ID": "test-sheet",
+                        "TREZOR_BTC_PUB_KEY": xpub,
+                    },
+                ),
+                patch("sheets.fetch_portfolio", return_value=portfolio),
+                patch("sheets.get_sdca_sheet_values", return_value={
+                    "cash_usd": 0.0,
+                    "buy_pct": 0.1,
+                    "kraken_btc": 0.0,
+                    "cold_btc": 0.0,
+                }),
+                patch("sheets.get_btc_usd_price", return_value=50_000.0),
+                patch("sheets.get_kraken_btc_balance", return_value=0.0),
+                patch("sheets.get_gspread_client", return_value=client),
+                patch(
+                    "sheets._fetch_mempool_address", return_value=unused_address
+                ) as fetch,
+                patch("sheets.time.monotonic", return_value=1_000.0),
+            ):
+                update_current_allocations_in_sheet()
+                update_current_allocations_in_sheet()
+
+            self.assertEqual(fetch.call_count, 20)
+        finally:
+            clear_btc_cold_balance_cache()
+
+    def test_expired_scan_rechecks_used_addresses_then_resumes_after_highest_index(
+        self,
+    ):
+        account = bip32.HDKey.from_seed(bytes(range(16))).derive("m/84h/0h/0h")
+        public_key = account.to_public(version=networks.NETWORKS["main"]["zpub"])
+        xpub = public_key.to_base58()
+        from sheets import _derive_trezor_receive_address
+
+        addresses = {
+            _derive_trezor_receive_address(public_key, index): index
+            for index in range(25)
+        }
+
+        def address_stats(address):
+            index = addresses[address]
+            return {
+                "chain_stats": {
+                    "funded_txo_sum": 1_000 if index == 1 else 0,
+                    "spent_txo_sum": 0,
+                    "tx_count": 1 if index == 1 else 0,
+                },
+                "mempool_stats": {
+                    "funded_txo_sum": 0,
+                    "spent_txo_sum": 0,
+                    "tx_count": 0,
+                },
+            }
+
+        clear_btc_cold_balance_cache()
+        try:
+            with (
+                patch.dict(os.environ, {"TREZOR_BTC_PUB_KEY": xpub}),
+                patch("sheets._fetch_mempool_address", side_effect=address_stats) as fetch,
+                patch("sheets.time.monotonic", side_effect=[0.0, 0.0, 91.0, 91.0]),
+            ):
+                self.assertAlmostEqual(get_btc_cold_balance(), 0.00001)
+                self.assertAlmostEqual(get_btc_cold_balance(), 0.00001)
+
+            second_scan_indices = [
+                addresses[call.args[0]] for call in fetch.call_args_list[25:]
+            ]
+            self.assertEqual(len(second_scan_indices), 21)
+            self.assertEqual(set(second_scan_indices), set(range(1, 22)))
+        finally:
+            clear_btc_cold_balance_cache()
 
     def test_sdca_kraken_btc_is_capped_at_actual_kraken_total(self):
         worksheet = Mock()

@@ -1,11 +1,13 @@
 import os
 import re
 import json
+import time
+from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 import httpx
 import gspread
 from embit import bip32, networks, script
-from typing import Dict, Tuple, TypedDict
+from typing import Any, Dict, Tuple, TypedDict
 from kraken import (
     fetch_portfolio,
     get_btc_usd_price,
@@ -15,6 +17,21 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 # Global cached client
 _gspread_client = None
+
+
+class ColdBalanceCache(TypedDict):
+    extended_key: str
+    timestamp: float
+    balance: float
+    used_indices: set[int]
+    highest_used_index: int
+
+
+_BTC_COLD_BALANCE_CACHE: ColdBalanceCache | None = None
+_BTC_COLD_BALANCE_CACHE_LOCK = Lock()
+# Cache within a rebalance cycle; BTC only moves between Kraken and this Trezor.
+BTC_COLD_BALANCE_CACHE_TTL_SECONDS = 90
+BTC_COLD_BALANCE_STALE_MAX_SECONDS = 180
 
 
 class TargetAllocation(TypedDict):
@@ -221,7 +238,7 @@ def _derive_trezor_receive_address(account_key: bip32.HDKey, index: int) -> str:
     return address_script.address(network=mainnet)
 
 
-def _fetch_mempool_address(address: str) -> dict:
+def _fetch_mempool_address(address: str) -> dict[str, Any]:
     response = httpx.get(
         f"https://mempool.space/api/address/{address}", timeout=15.0
     )
@@ -240,8 +257,88 @@ def _fetch_mempool_address(address: str) -> dict:
     return data
 
 
-def get_btc_cold_balance() -> float:
-    """Derive Trezor receive addresses and sum balances until a 20-address gap."""
+def _scan_trezor_cold_balance(
+    account_key: bip32.HDKey, cached: ColdBalanceCache | None
+) -> tuple[float, set[int], int]:
+    # Derive locally and use the public address endpoint rather than relying on
+    # an undocumented xpub endpoint.
+    gap_limit = 20
+    scan_batch_size = 5
+    total_satoshis = 0
+    unused_addresses = 0
+    used_indices = set(cached["used_indices"]) if cached else set()
+    highest_used_index = cached["highest_used_index"] if cached else -1
+    max_address_index = max(10_000, highest_used_index + 10_001)
+
+    def add_address_balance(data: dict[str, Any]) -> bool:
+        nonlocal total_satoshis
+        address_balance = 0
+        used = False
+        for stats_key in ("chain_stats", "mempool_stats"):
+            stats = data[stats_key]
+            address_balance += int(stats["funded_txo_sum"])
+            address_balance -= int(stats["spent_txo_sum"])
+            used = used or int(stats["tx_count"]) > 0
+        if address_balance < 0:
+            raise ValueError("Blockchain API returned a negative BTC address balance")
+        total_satoshis += address_balance
+        return used
+
+    # Recheck previously used addresses because BTC can return from this wallet
+    # to Kraken; discover only new receive addresses after the cached high-water mark.
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        known_addresses = (
+            _derive_trezor_receive_address(account_key, index)
+            for index in sorted(used_indices)
+        )
+        for index, data in zip(
+            sorted(used_indices), executor.map(_fetch_mempool_address, known_addresses)
+        ):
+            if add_address_balance(data):
+                used_indices.add(index)
+            else:
+                used_indices.discard(index)
+
+        start_index = max(0, highest_used_index + 1)
+        for start in range(start_index, max_address_index, scan_batch_size):
+            addresses = [
+                _derive_trezor_receive_address(account_key, index)
+                for index in range(
+                    start, min(start + scan_batch_size, max_address_index)
+                )
+            ]
+            for offset, data in enumerate(
+                executor.map(_fetch_mempool_address, addresses)
+            ):
+                index = start + offset
+                used = add_address_balance(data)
+                unused_addresses = 0 if used else unused_addresses + 1
+                if used:
+                    used_indices.add(index)
+                    highest_used_index = max(highest_used_index, index)
+                if unused_addresses >= gap_limit:
+                    return (
+                        total_satoshis / 100_000_000,
+                        used_indices,
+                        highest_used_index,
+                    )
+
+    raise ValueError(
+        f"No gap of {gap_limit} unused Trezor receive addresses found in "
+        f"the first {max_address_index} addresses"
+    )
+
+
+def clear_btc_cold_balance_cache() -> None:
+    """Invalidate the cached public balance after an SDCA trade."""
+    global _BTC_COLD_BALANCE_CACHE
+    with _BTC_COLD_BALANCE_CACHE_LOCK:
+        _BTC_COLD_BALANCE_CACHE = None
+
+
+def get_btc_cold_balance(force_refresh: bool = False) -> float:
+    """Return cached Trezor BTC or scan receive addresses until a 20-address gap."""
+    global _BTC_COLD_BALANCE_CACHE
     extended_key = os.getenv("TREZOR_BTC_PUB_KEY", "").strip()
     if not extended_key:
         return 0.0
@@ -261,40 +358,51 @@ def get_btc_cold_balance() -> float:
             "TREZOR_BTC_PUB_KEY must be an account-level extended public key"
         )
 
-    # Derive locally and use the public address endpoint rather than relying on
-    # an undocumented xpub endpoint.
-    gap_limit = 20
-    scan_batch_size = 5
-    max_addresses = 10_000
-    total_satoshis = 0
-    unused_addresses = 0
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        for start in range(0, max_addresses, scan_batch_size):
-            addresses = [
-                _derive_trezor_receive_address(account_key, index)
-                for index in range(start, min(start + scan_batch_size, max_addresses))
-            ]
-            for data in executor.map(_fetch_mempool_address, addresses):
-                address_balance = 0
-                used = False
-                for stats_key in ("chain_stats", "mempool_stats"):
-                    stats = data[stats_key]
-                    address_balance += int(stats["funded_txo_sum"])
-                    address_balance -= int(stats["spent_txo_sum"])
-                    used = used or int(stats["tx_count"]) > 0
-                if address_balance < 0:
-                    raise ValueError(
-                        "Blockchain API returned a negative BTC address balance"
-                    )
-                total_satoshis += address_balance
-                unused_addresses = 0 if used else unused_addresses + 1
-                if unused_addresses >= gap_limit:
-                    return total_satoshis / 100_000_000
+    with _BTC_COLD_BALANCE_CACHE_LOCK:
+        now = time.monotonic()
+        cached = (
+            _BTC_COLD_BALANCE_CACHE
+            if _BTC_COLD_BALANCE_CACHE
+            and _BTC_COLD_BALANCE_CACHE["extended_key"] == extended_key
+            else None
+        )
+        if (
+            not force_refresh
+            and cached
+            and now - cached["timestamp"] <= BTC_COLD_BALANCE_CACHE_TTL_SECONDS
+        ):
+            print("🧊 Using cached Trezor BTC balance.")
+            return cached["balance"]
 
-    raise ValueError(
-        f"No gap of {gap_limit} unused Trezor receive addresses found in "
-        f"the first {max_addresses} addresses"
-    )
+        try:
+            balance, used_indices, highest_used_index = _scan_trezor_cold_balance(
+                account_key, cached
+            )
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            if (
+                cached
+                and now - cached["timestamp"] <= BTC_COLD_BALANCE_STALE_MAX_SECONDS
+            ):
+                print(
+                    "⚠️ Trezor BTC scan failed; using recent cached balance: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                return cached["balance"]
+            raise
+
+        _BTC_COLD_BALANCE_CACHE = {
+            "extended_key": extended_key,
+            "timestamp": time.monotonic(),
+            "balance": balance,
+            "used_indices": used_indices,
+            "highest_used_index": highest_used_index,
+        }
+        print(
+            "🔎 Scanned Trezor BTC balance "
+            f"({len(used_indices)} used addresses; highest index "
+            f"{highest_used_index})."
+        )
+        return balance
 
 
 def update_sdca_cash_in_sheet(cash_usd: float) -> None:
@@ -302,7 +410,10 @@ def update_sdca_cash_in_sheet(cash_usd: float) -> None:
     _get_signals_worksheet().update("Q3", [[cash_usd]], value_input_option="RAW")
 
 
-def update_current_allocations_in_sheet(sdca_btc_adjustment: float = 0.0):
+def update_current_allocations_in_sheet(
+    sdca_btc_adjustment: float = 0.0,
+    force_cold_balance_refresh: bool = False,
+):
     """Update Column E with current allocation capital in USD.
 
     Spot holdings and short used margin are both positive.
@@ -333,7 +444,7 @@ def update_current_allocations_in_sheet(sdca_btc_adjustment: float = 0.0):
         0.0,
         stable_breakdown.get("USD", 0.0) - max(0.0, sdca_values["cash_usd"]),
     )
-    cold_btc = get_btc_cold_balance()
+    cold_btc = get_btc_cold_balance(force_refresh=force_cold_balance_refresh)
     btc_price = get_btc_usd_price()
     sdca_total_btc = sdca_values["kraken_btc"] + sdca_values["cold_btc"]
     tracked_sdca_total = max(0.0, sdca_total_btc + sdca_btc_adjustment)

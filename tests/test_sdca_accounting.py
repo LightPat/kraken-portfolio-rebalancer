@@ -149,7 +149,9 @@ class SdcaCashAccountingTests(unittest.TestCase):
             result = rebalancer.execute_sdca_trade("buy")
 
         update_cash.assert_called_once_with(89.9)
-        update_allocations.assert_called_once_with(sdca_btc_adjustment=0.1)
+        update_allocations.assert_called_once_with(
+            sdca_btc_adjustment=0.1, force_cold_balance_refresh=True
+        )
         self.assertAlmostEqual(result["actual_quote_amount_usd"], 10.1)
 
     def test_sell_returns_actual_proceeds_and_reduces_tracked_btc(self):
@@ -193,7 +195,9 @@ class SdcaCashAccountingTests(unittest.TestCase):
             result = rebalancer.execute_sdca_trade("sell", 50)
 
         update_cash.assert_called_once_with(104.0)
-        update_allocations.assert_called_once_with(sdca_btc_adjustment=-0.04)
+        update_allocations.assert_called_once_with(
+            sdca_btc_adjustment=-0.04, force_cold_balance_refresh=True
+        )
         self.assertAlmostEqual(result["actual_quote_amount_usd"], 4.0)
 
 
