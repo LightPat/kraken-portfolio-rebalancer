@@ -349,6 +349,14 @@ def _force_2x_leverage(params: Dict) -> None:
     params["leverage"] = "2"
 
 
+# US retail margin orders must use Kraken's Bitnomial :BTNL pair symbols.
+def _margin_symbol(symbol: str) -> str:
+    """Return the Bitnomial symbol required for US retail margin orders."""
+    if symbol.endswith(":BTNL"):
+        return symbol
+    return f"{symbol}:BTNL"
+
+
 def create_market_order(
     symbol: str,
     side: str,
@@ -365,7 +373,10 @@ def create_market_order(
         params["reduceOnly"] = True
 
     try:
-        return exchange.create_order(symbol, "market", side, amount, None, params)
+        order_symbol = _margin_symbol(symbol) if margin else symbol
+        return exchange.create_order(
+            order_symbol, "market", side, amount, None, params
+        )
     except Exception as e:
         if margin:
             raise _margin_order_error(e) from e
@@ -392,7 +403,10 @@ def create_post_only_limit_order(
         params["reduceOnly"] = True
 
     try:
-        order = exchange.create_order(symbol, "limit", side, amount, price, params)
+        order_symbol = _margin_symbol(symbol) if margin else symbol
+        order = exchange.create_order(
+            order_symbol, "limit", side, amount, price, params
+        )
         return order
     except Exception as e:
         err = str(e).lower()
