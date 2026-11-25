@@ -249,21 +249,49 @@ def update_current_allocations_in_sheet():
 
 
 def parse_signal_update(text: str) -> Dict[str, Tuple[float, str]]:
-    """Parse the exact Telegram 'Portfolio Signal Update' format.
-    Returns {ASSET: (target_pct_decimal, direction)} e.g. {'HYPE': (0.344, 'Long')}
-    CASH lines are completely skipped.
+    """Parse RSPS and Short Module targets from a Portfolio Signal Update.
+
+    Returns {ASSET: (target_pct_decimal, direction)}. Net Positions are
+    intentionally ignored because they repeat the allocations in the modules.
     """
-    # Matches lines like: - 34.4% HYPE LONG 🟢   or   - 17.3% CASH 💵
-    pattern = r"-\s+([\d.]+)%\s+([A-Z0-9]+)(?:\s+(LONG|CASH))?"
-    matches = re.findall(pattern, text, re.IGNORECASE)
+    section_pattern = re.compile(
+        r"(?im)^[^\r\n]*\b(RSPS Signal|Short Module|Net Positions):[^\r\n]*$"
+    )
+    sections = list(section_pattern.finditer(text))
+    if sections:
+        signal_sections = []
+        for index, section in enumerate(sections):
+            if section.group(1).lower() not in {"rsps signal", "short module"}:
+                continue
+            section_end = (
+                sections[index + 1].start()
+                if index + 1 < len(sections)
+                else len(text)
+            )
+            signal_sections.append(text[section.end() : section_end])
+        signal_text = "\n".join(signal_sections)
+    else:
+        # Preserve support for older messages that omitted section headings.
+        signal_text = text
+
+    pattern = re.compile(
+        r"-\s*([\d.]+)%\s+([A-Z0-9]+)(?:\s+(LONG|SHORT|CASH))?\b",
+        re.IGNORECASE,
+    )
     targets: Dict[str, Tuple[float, str]] = {}
-    for pct_str, asset, direction in matches:
+    for line in signal_text.splitlines():
+        line = line.replace("*", "")
+        match = pattern.search(line)
+        if not match:
+            continue
+        pct_str, asset, direction = match.groups()
         asset = asset.strip().upper()
         if asset == "CASH":
-            continue  # Skip CASH completely
-        pct = float(pct_str) / 100
-        dir_val = (direction or "Long").capitalize()
-        targets[asset] = (pct, dir_val)
+            continue
+        targets[asset] = (
+            float(pct_str) / 100,
+            (direction or "Long").capitalize(),
+        )
     return targets
 
 
