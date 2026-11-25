@@ -161,6 +161,28 @@ class QuoteCurrencyTests(unittest.TestCase):
 
         self.assertEqual(warnings, [])
 
+    def test_quote_balance_validation_preserves_sdca_cash(self):
+        exchange = Mock()
+        exchange.fetch_balance.return_value = {"free": {"USD": 500.0}}
+        trade = {
+            "symbol": "BTC/USD",
+            "asset": "BTC",
+            "action": "open_long",
+            "amount_usd": 300.0,
+            "capital_usd": 300.0,
+        }
+
+        with (
+            patch("kraken.get_kraken_exchange", return_value=exchange),
+            patch("kraken.fetch_margin_positions", return_value=[]),
+        ):
+            warnings = kraken.validate_quote_balances(
+                [trade], reserved_quote_balances={"USD": 250.0}
+            )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("requires $50.00 more USD", warnings[0])
+
 
 class MarginSymbolTests(unittest.TestCase):
     def setUp(self):
