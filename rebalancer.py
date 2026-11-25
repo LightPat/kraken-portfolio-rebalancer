@@ -325,12 +325,26 @@ def calculate_sdca_cash_balance(
     return current_cash_usd + actual_quote_amount_usd
 
 
-def generate_sdca_plan(action: str, sell_percentage: float | None = None) -> Dict:
-    if action not in {"buy", "sell"}:
-        raise ValueError(f"Unsupported SDCA action: {action}")
-
+def generate_sdca_plan() -> Dict:
     update_current_allocations_in_sheet()
     sdca = get_sdca_sheet_values()
+    change_pct = sdca["change_pct"]
+    action = "buy" if change_pct > 0 else "sell" if change_pct < 0 else None
+    if action is None:
+        return {
+            "action": None,
+            "price": 0.0,
+            "amount_usd": 0.0,
+            "amount_base": 0.0,
+            "target_btc": 0.0,
+            "unavailable_btc": 0.0,
+            "change_pct": change_pct,
+            "cash_usd": sdca["cash_usd"],
+            "kraken_btc": sdca["kraken_btc"],
+            "cold_btc": sdca["cold_btc"],
+            "dry_run": os.getenv("DRY_RUN", "false").lower() == "true",
+        }
+
     exchange = get_kraken_exchange()
     symbol = get_best_trading_symbol("BTC")
     if _quote_currency(symbol) != "USD":
@@ -341,15 +355,21 @@ def generate_sdca_plan(action: str, sell_percentage: float | None = None) -> Dic
         raise ValueError(f"No valid price available for {symbol}")
 
     if action == "buy":
-        amount_usd = sdca["buy_pct"] * sdca["cash_usd"]
+        amount_usd = change_pct * sdca["cash_usd"]
         amount_base = amount_usd / price
-    else:
-        if sell_percentage is None or not 0 < sell_percentage <= 100:
-            raise ValueError(
-                "SDCA sell percentage must be greater than 0 and at most 100"
-            )
-        amount_base = sdca["kraken_btc"] * sell_percentage / 100
+        target_btc = 0.0
+        unavailable_btc = 0.0
+    elif action == "sell":
+        target_btc = abs(change_pct) * (sdca["kraken_btc"] + sdca["cold_btc"])
+        free_btc = get_free_balance("BTC")
+        amount_base = min(target_btc, free_btc, sdca["kraken_btc"])
+        unavailable_btc = max(0.0, target_btc - amount_base)
         amount_usd = amount_base * price
+    else:
+        target_btc = 0.0
+        unavailable_btc = 0.0
+        amount_base = 0.0
+        amount_usd = 0.0
 
     return {
         "action": action,
@@ -357,7 +377,9 @@ def generate_sdca_plan(action: str, sell_percentage: float | None = None) -> Dic
         "price": float(price),
         "amount_usd": amount_usd,
         "amount_base": amount_base,
-        "sell_percentage": sell_percentage,
+        "target_btc": target_btc,
+        "unavailable_btc": unavailable_btc,
+        "change_pct": change_pct,
         "cash_usd": sdca["cash_usd"],
         "kraken_btc": sdca["kraken_btc"],
         "cold_btc": sdca["cold_btc"],
@@ -412,35 +434,48 @@ def _collect_sdca_order_fills(
     return quote_amount, btc_delta
 
 
-def execute_sdca_trade(
-    action: str, sell_percentage: float | None = None
-) -> Dict[str, Any]:
-    plan = generate_sdca_plan(action, sell_percentage)
+def execute_sdca_trade() -> Dict[str, Any]:
+    plan = generate_sdca_plan()
+    action = plan["action"]
     results: List[str] = []
+    if action is None or plan["amount_base"] <= 0:
+        results.append("ℹ️ SDCA Change % Today is zero; nothing to do.")
+        return {"results": results, "plan": plan, "dry_run": plan["dry_run"]}
     if plan["dry_run"]:
         results.append(
             f"🧪 DRY-RUN: Would {action} {plan['amount_base']:.8f} BTC "
             f"(~${plan['amount_usd']:.2f}); SDCA cash remains unchanged."
         )
+        if action == "sell" and plan["unavailable_btc"] > 0:
+            results.append(
+                f"📥 Move {plan['unavailable_btc']:.8f} BTC from cold storage "
+                "to Kraken to complete the intended sale."
+            )
         update_current_allocations_in_sheet()
         return {"results": results, "plan": plan, "dry_run": True}
-    if plan["amount_base"] <= 0:
-        raise ValueError(f"SDCA {action} amount is zero")
 
-    if action == "sell":
-        free_btc = get_free_balance("BTC")
-        if plan["amount_base"] > free_btc + 1e-8:
-            raise ValueError(
-                "SDCA sell exceeds free Kraken BTC; refusing to sell BTC "
-                "outside the tracked SDCA balance."
-            )
-    else:
+    if action == "buy":
         free_usd = get_free_balance("USD")
         if plan["amount_usd"] > free_usd + 1e-8:
             raise ValueError(
                 f"SDCA buy requires ${plan['amount_usd']:.2f}, but only "
                 f"${free_usd:.2f} USD is available on Kraken."
             )
+    else:
+        free_btc = get_free_balance("BTC")
+        plan["amount_base"] = min(
+            plan["target_btc"], free_btc, plan["kraken_btc"]
+        )
+        plan["unavailable_btc"] = max(
+            0.0, plan["target_btc"] - plan["amount_base"]
+        )
+        if plan["amount_base"] <= 0:
+            results.append(
+                f"📥 Move {plan['target_btc']:.8f} BTC from cold storage "
+                "to Kraken before selling."
+            )
+            update_current_allocations_in_sheet()
+            return {"results": results, "plan": plan, "dry_run": False}
 
     exchange = get_kraken_exchange()
     ticker = exchange.fetch_ticker(plan["symbol"])
@@ -464,8 +499,6 @@ def execute_sdca_trade(
     initial_status = str(initial_order.get("status", "")).lower()
     if (
         initial_order.get("id")
-        and initial_status
-        not in {"closed", "filled", "canceled", "cancelled", "expired"}
         and (
             initial_status in {"open", "pending", "new"}
             or get_order_remaining(initial_order) > 0
@@ -515,6 +548,12 @@ def execute_sdca_trade(
         results.append(
             f"📤 Withdraw approximately {abs(btc_delta):.8f} BTC "
             "to cold storage when ready."
+        )
+    elif plan["target_btc"] > abs(btc_delta) + 1e-8:
+        additional_btc = plan["target_btc"] - abs(btc_delta)
+        results.append(
+            f"📥 Move an additional {additional_btc:.8f} BTC from "
+            "cold storage to Kraken to complete the intended sale."
         )
     return {
         "results": results,

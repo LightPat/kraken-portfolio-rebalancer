@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import math
 import time
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
@@ -207,17 +208,25 @@ def get_rsps_allocation_pct() -> float:
 
 
 def get_sdca_sheet_values() -> dict[str, float]:
-    """Read SDCA's cash, daily buy fraction, and tracked BTC balances."""
+    """Read SDCA's cash, signed daily change fraction, and tracked BTC balances."""
     worksheet = _get_signals_worksheet()
     cash = _parse_sheet_numeric_value(worksheet.acell("Q3").value, "Q3")
-    buy_pct = _parse_fraction_cell(worksheet.acell("Q4").value, "Q4")
+    change_pct_value = worksheet.acell("Q4").value
+    try:
+        change_pct = float(str(change_pct_value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Expected a signed decimal change in Q4, got: {change_pct_value!r}"
+        ) from exc
+    if not math.isfinite(change_pct):
+        raise ValueError(f"Expected a finite signed decimal change in Q4")
     kraken_btc = _parse_sheet_numeric_value(worksheet.acell("Q7").value, "Q7")
     cold_btc = _parse_sheet_numeric_value(worksheet.acell("Q8").value, "Q8")
     if kraken_btc < 0 or cold_btc < 0:
         raise ValueError("SDCA BTC balances must not be negative")
     return {
         "cash_usd": cash,
-        "buy_pct": buy_pct,
+        "change_pct": change_pct,
         "kraken_btc": kraken_btc,
         "cold_btc": cold_btc,
     }
