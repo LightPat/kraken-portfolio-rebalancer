@@ -11,17 +11,68 @@ STABLE_COINS: Set[str] = {"USD", "USDC", "USDG"}
 _exchange = None
 
 
+def _ensure_bitnomial_markets(exchange) -> None:
+    """Load Kraken's Bitnomial pairs into CCXT's market indexes."""
+    exchange.load_markets()
+    pairs = exchange.publicGetAssetPairs(
+        {"execution_venue": "bitnomial_exchange"}
+    )["result"]
+
+    markets = exchange.markets
+    markets_by_id = exchange.markets_by_id
+    symbols = exchange.symbols
+
+    for market_id, raw in pairs.items():
+        symbol = raw.get("wsname") or raw.get("altname")
+        if not symbol:
+            raise ValueError(f"Bitnomial market {market_id} has no symbol")
+
+        if "/" not in symbol:
+            base = exchange.safe_currency_code(raw["base"])
+            quote = exchange.safe_currency_code(raw["quote"])
+            suffix = f":{symbol.split(':', 1)[1]}" if ":" in symbol else ""
+            symbol = f"{base}/{quote}{suffix}"
+
+        base, quote = symbol.split(":", 1)[0].split("/", 1)
+        market = markets.get(symbol)
+        if market is None:
+            market = {
+                "id": market_id,
+                "symbol": symbol,
+                "base": base,
+                "quote": quote,
+                "active": True,
+                "type": "spot",
+                "spot": True,
+                "margin": True,
+                "precision": {
+                    "amount": 10 ** -int(raw["lot_decimals"]),
+                    "price": float(raw["tick_size"]),
+                },
+                "info": raw,
+            }
+            markets[symbol] = market
+
+        markets_for_id = markets_by_id.setdefault(market_id, [])
+        if not any(existing["symbol"] == symbol for existing in markets_for_id):
+            markets_for_id.append(market)
+        if symbol not in symbols:
+            symbols.append(symbol)
+
+
 def get_kraken_exchange():
     """Singleton CCXT Kraken exchange instance for reuse."""
     global _exchange
     if _exchange is None:
-        _exchange = ccxt.kraken(
+        exchange = ccxt.kraken(
             {
                 "apiKey": os.getenv("KRAKEN_API_KEY"),
                 "secret": os.getenv("KRAKEN_API_SECRET"),
                 "enableRateLimit": True,
             }
         )
+        _ensure_bitnomial_markets(exchange)
+        _exchange = exchange
     return _exchange
 
 

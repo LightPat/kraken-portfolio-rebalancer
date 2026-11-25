@@ -1,7 +1,80 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import kraken
+
+
+class BitnomialMarketTests(unittest.TestCase):
+    def setUp(self):
+        self.exchange = Mock()
+        self.exchange.markets = {}
+        self.exchange.markets_by_id = {}
+        self.exchange.symbols = []
+        self.exchange.safe_currency_code.side_effect = {
+            "XETH": "ETH",
+            "ZUSD": "USD",
+        }.__getitem__
+
+    def test_registers_bitnomial_markets_idempotently(self):
+        raw_market = {
+            "wsname": "ETH/USD:BTNL",
+            "altname": "ETHUSD:BTNL",
+            "base": "XETH",
+            "quote": "ZUSD",
+            "lot_decimals": "8",
+            "tick_size": "0.01",
+        }
+        self.exchange.publicGetAssetPairs.return_value = {
+            "result": {"ETHUSD:BTNL": raw_market}
+        }
+
+        kraken._ensure_bitnomial_markets(self.exchange)
+        kraken._ensure_bitnomial_markets(self.exchange)
+
+        market = self.exchange.markets["ETH/USD:BTNL"]
+        self.assertEqual(market["id"], "ETHUSD:BTNL")
+        self.assertEqual((market["base"], market["quote"]), ("ETH", "USD"))
+        self.assertTrue(market["active"])
+        self.assertEqual(market["type"], "spot")
+        self.assertTrue(market["spot"])
+        self.assertTrue(market["margin"])
+        self.assertEqual(market["precision"], {"amount": 1e-8, "price": 0.01})
+        self.assertIs(market["info"], raw_market)
+        self.assertEqual(self.exchange.markets_by_id["ETHUSD:BTNL"], [market])
+        self.assertEqual(self.exchange.symbols, ["ETH/USD:BTNL"])
+        self.exchange.publicGetAssetPairs.assert_called_with(
+            {"execution_venue": "bitnomial_exchange"}
+        )
+
+    def test_builds_slash_symbol_from_altname_when_wsname_is_missing(self):
+        self.exchange.publicGetAssetPairs.return_value = {
+            "result": {
+                "ETHUSD:BTNL": {
+                    "altname": "ETHUSD:BTNL",
+                    "base": "XETH",
+                    "quote": "ZUSD",
+                    "lot_decimals": "8",
+                    "tick_size": "0.01",
+                }
+            }
+        }
+
+        kraken._ensure_bitnomial_markets(self.exchange)
+
+        self.assertIn("ETH/USD:BTNL", self.exchange.markets)
+
+    def test_get_exchange_registers_markets_when_created(self):
+        original_exchange = kraken._exchange
+        self.addCleanup(setattr, kraken, "_exchange", original_exchange)
+        kraken._exchange = None
+        with (
+            patch("kraken.ccxt.kraken", return_value=self.exchange),
+            patch("kraken._ensure_bitnomial_markets") as ensure_markets,
+        ):
+            result = kraken.get_kraken_exchange()
+
+        self.assertIs(result, self.exchange)
+        ensure_markets.assert_called_once_with(self.exchange)
 
 
 class MarginSymbolTests(unittest.TestCase):
