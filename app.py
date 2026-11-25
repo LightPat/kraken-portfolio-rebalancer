@@ -83,34 +83,36 @@ async def execute_rebalance():
     try:
         with rebalance_lock.acquire(timeout=REBALANCE_LOCK_TIMEOUT_SECONDS):
             reset_cancel_rebalance()
+            try:
+                # 1. Get the latest plan (same as /rebalance/plan)
+                plan_data = generate_rebalance_plan()
+                trade_plan = plan_data.get("plan", [])
 
-            # 1. Get the latest plan (same as /rebalance/plan)
-            plan_data = generate_rebalance_plan()
-            trade_plan = plan_data.get("plan", [])
+                # 2. Early return if nothing to do
+                if not trade_plan:
+                    return {
+                        "status": "already_balanced",
+                        "message": "Portfolio is already balanced according to targets.",
+                        "dry_run": plan_data["dry_run"],
+                        "total_value_usd": plan_data["total_value_usd"],
+                        "plan_data": plan_data,
+                    }
 
-            # 2. Early return if nothing to do
-            if not trade_plan:
+                results = execute_trades(trade_plan)
                 return {
-                    "status": "already_balanced",
-                    "message": "Portfolio is already balanced according to targets.",
-                    "dry_run": plan_data["dry_run"],
+                    "status": "executed",
+                    "message": "Rebalance trades executed successfully.",
+                    "results": results,
                     "total_value_usd": plan_data["total_value_usd"],
+                    "desired_reserve": plan_data["desired_reserve"],
+                    "investable_value": plan_data["investable_value"],
+                    "current_stables_total": plan_data["current_stables_total"],
+                    "dry_run": plan_data["dry_run"],
+                    "executed_plan": trade_plan,
                     "plan_data": plan_data,
                 }
-
-            results = execute_trades(trade_plan)
-            return {
-                "status": "executed",
-                "message": "Rebalance trades executed successfully.",
-                "results": results,
-                "total_value_usd": plan_data["total_value_usd"],
-                "desired_reserve": plan_data["desired_reserve"],
-                "investable_value": plan_data["investable_value"],
-                "current_stables_total": plan_data["current_stables_total"],
-                "dry_run": plan_data["dry_run"],
-                "executed_plan": trade_plan,
-                "plan_data": plan_data,
-            }
+            finally:
+                update_current_allocations_in_sheet()
     except Timeout:
         age = None
         try:

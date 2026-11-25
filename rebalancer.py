@@ -8,8 +8,8 @@ from sheets import (
     get_desired_cash_reserve,
     get_rsps_allocation_pct,
     get_sdca_sheet_values,
-    get_btc_cold_balance,
-    update_sdca_values,
+    update_current_allocations_in_sheet,
+    update_sdca_cash_in_sheet,
 )
 from kraken import (
     fetch_portfolio,
@@ -61,6 +61,7 @@ def is_rebalance_cancel_requested() -> bool:
 
 
 def generate_rebalance_plan() -> Dict[str, Any]:
+    update_current_allocations_in_sheet()
     exchange = get_kraken_exchange()
     (
         spot_value_by_asset,
@@ -328,6 +329,7 @@ def generate_sdca_plan(action: str, sell_percentage: float | None = None) -> Dic
     if action not in {"buy", "sell"}:
         raise ValueError(f"Unsupported SDCA action: {action}")
 
+    update_current_allocations_in_sheet()
     sdca = get_sdca_sheet_values()
     exchange = get_kraken_exchange()
     symbol = get_best_trading_symbol("BTC")
@@ -420,10 +422,10 @@ def execute_sdca_trade(
             f"🧪 DRY-RUN: Would {action} {plan['amount_base']:.8f} BTC "
             f"(~${plan['amount_usd']:.2f}); SDCA cash remains unchanged."
         )
+        update_current_allocations_in_sheet()
         return {"results": results, "plan": plan, "dry_run": True}
     if plan["amount_base"] <= 0:
         raise ValueError(f"SDCA {action} amount is zero")
-    cold_btc = get_btc_cold_balance()
 
     if action == "sell":
         free_btc = get_free_balance("BTC")
@@ -442,9 +444,6 @@ def execute_sdca_trade(
 
     exchange = get_kraken_exchange()
     ticker = exchange.fetch_ticker(plan["symbol"])
-    valuation_price = ticker.get("last") or ticker.get("close")
-    if not valuation_price or valuation_price <= 0:
-        raise ValueError(f"No valid price available for {plan['symbol']}")
     side = "buy" if action == "buy" else "sell"
     limit_price = get_safe_post_only_price(ticker, side)
     if limit_price <= 0:
@@ -503,11 +502,8 @@ def execute_sdca_trade(
     cash_usd = calculate_sdca_cash_balance(
         sdca["cash_usd"], action, actual_quote_amount
     )
-    kraken_btc = sdca["kraken_btc"] + btc_delta
-    if kraken_btc < -1e-8:
-        raise RuntimeError("SDCA sell would make its tracked BTC balance negative")
-    kraken_btc = round(max(0.0, kraken_btc), 8)
-    update_sdca_values(cash_usd, kraken_btc, cold_btc, float(valuation_price))
+    update_sdca_cash_in_sheet(cash_usd)
+    update_current_allocations_in_sheet(sdca_btc_adjustment=btc_delta)
 
     results.append(
         f"✅ SDCA {action.upper()} filled: {abs(btc_delta):.8f} BTC, "

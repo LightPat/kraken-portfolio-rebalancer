@@ -1,8 +1,10 @@
 import os
 import re
 import json
+from concurrent.futures import ThreadPoolExecutor
 import httpx
 import gspread
+from embit import bip32, networks, script
 from typing import Dict, Tuple, TypedDict
 from kraken import (
     fetch_portfolio,
@@ -204,62 +206,103 @@ def get_sdca_sheet_values() -> dict[str, float]:
     }
 
 
-def get_btc_cold_balance() -> float:
-    """Sum confirmed and unconfirmed BTC balances for configured cold addresses."""
-    addresses = [
-        address.strip()
-        for address in os.getenv("BTC_COLD_ADDRESS", "").split(",")
-        if address.strip()
-    ]
-    addresses = list(dict.fromkeys(addresses))
-    if not addresses:
-        raise ValueError("BTC_COLD_ADDRESS is not set in .env")
-
-    total_satoshis = 0
-    for address in addresses:
-        response = httpx.get(
-            f"https://mempool.space/api/address/{address}", timeout=15.0
-        )
-        response.raise_for_status()
-        data = response.json()
-        for stats_key in ("chain_stats", "mempool_stats"):
-            stats = data.get(stats_key)
-            if not isinstance(stats, dict) or not {
-                "funded_txo_sum",
-                "spent_txo_sum",
-            }.issubset(stats):
-                raise ValueError(
-                    f"Blockchain API response is missing {stats_key} for {address}"
-                )
-            total_satoshis += int(stats["funded_txo_sum"])
-            total_satoshis -= int(stats["spent_txo_sum"])
-    if total_satoshis < 0:
-        raise ValueError("Blockchain API returned a negative BTC address balance")
-    return total_satoshis / 100_000_000
+def _derive_trezor_receive_address(account_key: bip32.HDKey, index: int) -> str:
+    child_key = account_key.derive([0, index]).key
+    version = account_key.version
+    mainnet = networks.NETWORKS["main"]
+    if version == mainnet["xpub"]:
+        address_script = script.p2pkh(child_key)
+    elif version == mainnet["ypub"]:
+        address_script = script.p2sh(script.p2wpkh(child_key))
+    elif version == mainnet["zpub"]:
+        address_script = script.p2wpkh(child_key)
+    else:
+        raise ValueError("TREZOR_BTC_PUB_KEY must use an xpub, ypub, or zpub prefix")
+    return address_script.address(network=mainnet)
 
 
-def update_sdca_values(
-    cash_usd: float, kraken_btc: float, cold_btc: float, btc_price: float
-) -> float:
-    """Write SDCA balances without changing sheet formulas or strategy splits."""
-    if min(kraken_btc, cold_btc) < 0 or btc_price <= 0:
-        raise ValueError("SDCA BTC balances must be non-negative and BTC price positive")
-
-    equity_usd = round(cash_usd + (kraken_btc + cold_btc) * btc_price, 2)
-    worksheet = _get_signals_worksheet()
-    worksheet.batch_update(
-        [
-            {"range": "Q3", "values": [[cash_usd]]},
-            {"range": "Q7", "values": [[kraken_btc]]},
-            {"range": "Q8", "values": [[cold_btc]]},
-            {"range": "Q10", "values": [[equity_usd]]},
-        ],
-        value_input_option="RAW",
+def _fetch_mempool_address(address: str) -> dict:
+    response = httpx.get(
+        f"https://mempool.space/api/address/{address}", timeout=15.0
     )
-    return equity_usd
+    response.raise_for_status()
+    data = response.json()
+    for stats_key in ("chain_stats", "mempool_stats"):
+        stats = data.get(stats_key)
+        if not isinstance(stats, dict) or not {
+            "funded_txo_sum",
+            "spent_txo_sum",
+            "tx_count",
+        }.issubset(stats):
+            raise ValueError(
+                f"Blockchain API response is missing {stats_key} for {address}"
+            )
+    return data
 
 
-def update_current_allocations_in_sheet():
+def get_btc_cold_balance() -> float:
+    """Derive Trezor receive addresses and sum balances until a 20-address gap."""
+    extended_key = os.getenv("TREZOR_BTC_PUB_KEY", "").strip()
+    if not extended_key:
+        return 0.0
+
+    account_key = bip32.HDKey.from_base58(extended_key)
+    supported_versions = {
+        networks.NETWORKS["main"]["xpub"],
+        networks.NETWORKS["main"]["ypub"],
+        networks.NETWORKS["main"]["zpub"],
+    }
+    if account_key.is_private or account_key.version not in supported_versions:
+        raise ValueError(
+            "TREZOR_BTC_PUB_KEY must be a mainnet account-level xpub, ypub, or zpub"
+        )
+    if account_key.depth < 3:
+        raise ValueError(
+            "TREZOR_BTC_PUB_KEY must be an account-level extended public key"
+        )
+
+    # Derive locally and use the public address endpoint rather than relying on
+    # an undocumented xpub endpoint.
+    gap_limit = 20
+    scan_batch_size = 5
+    max_addresses = 10_000
+    total_satoshis = 0
+    unused_addresses = 0
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        for start in range(0, max_addresses, scan_batch_size):
+            addresses = [
+                _derive_trezor_receive_address(account_key, index)
+                for index in range(start, min(start + scan_batch_size, max_addresses))
+            ]
+            for data in executor.map(_fetch_mempool_address, addresses):
+                address_balance = 0
+                used = False
+                for stats_key in ("chain_stats", "mempool_stats"):
+                    stats = data[stats_key]
+                    address_balance += int(stats["funded_txo_sum"])
+                    address_balance -= int(stats["spent_txo_sum"])
+                    used = used or int(stats["tx_count"]) > 0
+                if address_balance < 0:
+                    raise ValueError(
+                        "Blockchain API returned a negative BTC address balance"
+                    )
+                total_satoshis += address_balance
+                unused_addresses = 0 if used else unused_addresses + 1
+                if unused_addresses >= gap_limit:
+                    return total_satoshis / 100_000_000
+
+    raise ValueError(
+        f"No gap of {gap_limit} unused Trezor receive addresses found in "
+        f"the first {max_addresses} addresses"
+    )
+
+
+def update_sdca_cash_in_sheet(cash_usd: float) -> None:
+    """Update only SDCA's USD cash pool after a confirmed trade fill."""
+    _get_signals_worksheet().update("Q3", [[cash_usd]], value_input_option="RAW")
+
+
+def update_current_allocations_in_sheet(sdca_btc_adjustment: float = 0.0):
     """Update Column E with current allocation capital in USD.
 
     Spot holdings and short used margin are both positive.
@@ -293,15 +336,13 @@ def update_current_allocations_in_sheet():
     cold_btc = get_btc_cold_balance()
     btc_price = get_btc_usd_price()
     sdca_total_btc = sdca_values["kraken_btc"] + sdca_values["cold_btc"]
-    sdca_kraken_btc = round(max(0.0, sdca_total_btc - cold_btc), 8)
+    tracked_sdca_total = max(0.0, sdca_total_btc + sdca_btc_adjustment)
+    sdca_kraken_btc = round(max(0.0, tracked_sdca_total - cold_btc), 8)
     kraken_btc = get_kraken_btc_balance()
-    if sdca_kraken_btc > kraken_btc + 1e-8:
-        raise ValueError(
-            "Tracked SDCA BTC on Kraken exceeds the actual Kraken BTC balance"
-        )
+    sdca_kraken_btc = min(sdca_kraken_btc, kraken_btc)
     rsps_btc = round(kraken_btc - sdca_kraken_btc, 8)
-    update_sdca_values(
-        sdca_values["cash_usd"], sdca_kraken_btc, cold_btc, btc_price
+    sdca_equity = round(
+        sdca_values["cash_usd"] + (sdca_kraken_btc + cold_btc) * btc_price, 2
     )
 
     current_values = dict(spot_value_by_asset)
@@ -313,6 +354,14 @@ def update_current_allocations_in_sheet():
 
     gc = get_gspread_client()
     worksheet = gc.open_by_key(spreadsheet_id).worksheet("Signals")
+    worksheet.batch_update(
+        [
+            {"range": "Q7", "values": [[sdca_kraken_btc]]},
+            {"range": "Q8", "values": [[cold_btc]]},
+            {"range": "Q10", "values": [[sdca_equity]]},
+        ],
+        value_input_option="RAW",
+    )
     worksheet.update("E5", [[rsps_btc]], value_input_option="RAW")
 
     # Read only Column A (assets)

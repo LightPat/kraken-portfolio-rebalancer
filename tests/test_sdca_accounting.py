@@ -33,6 +33,9 @@ class CapitalSplitTests(unittest.TestCase):
         )
         with (
             patch("rebalancer.get_kraken_exchange"),
+            patch(
+                "rebalancer.update_current_allocations_in_sheet"
+            ) as update_allocations,
             patch("rebalancer.fetch_portfolio", return_value=portfolio),
             patch("rebalancer.get_target_allocations", return_value={}),
             patch("rebalancer.fetch_margin_positions", return_value=[]),
@@ -51,9 +54,48 @@ class CapitalSplitTests(unittest.TestCase):
             plan = rebalancer.generate_rebalance_plan()
 
         self.assertEqual(plan["investable_value"], 600.0)
+        update_allocations.assert_called_once_with()
 
 
 class SdcaCashAccountingTests(unittest.TestCase):
+    def test_sdca_plan_refreshes_allocations_before_reading_plan_inputs(self):
+        with (
+            patch("rebalancer.update_current_allocations_in_sheet") as refresh,
+            patch("rebalancer.get_kraken_exchange") as exchange,
+            patch(
+                "rebalancer.get_sdca_sheet_values",
+                return_value={
+                    "cash_usd": 100.0,
+                    "buy_pct": 0.1,
+                    "kraken_btc": 0.0,
+                    "cold_btc": 0.0,
+                },
+            ),
+            patch("rebalancer.get_best_trading_symbol", return_value="BTC/USD"),
+        ):
+            exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
+            result = rebalancer.generate_sdca_plan("buy")
+
+        refresh.assert_called_once_with()
+        self.assertAlmostEqual(result["amount_usd"], 10.0)
+
+    def test_sdca_dry_run_refreshes_allocations_after_plan(self):
+        plan = {
+            "action": "buy",
+            "symbol": "BTC/USD",
+            "amount_usd": 10.0,
+            "amount_base": 0.1,
+            "dry_run": True,
+        }
+        with (
+            patch("rebalancer.generate_sdca_plan", return_value=plan),
+            patch("rebalancer.update_current_allocations_in_sheet") as refresh,
+        ):
+            result = rebalancer.execute_sdca_trade("buy")
+
+        refresh.assert_called_once_with()
+        self.assertTrue(result["dry_run"])
+
     def test_buy_subtracts_actual_spend_from_sdca_cash(self):
         self.assertAlmostEqual(
             rebalancer.calculate_sdca_cash_balance(100, "buy", 8.656),
@@ -100,18 +142,14 @@ class SdcaCashAccountingTests(unittest.TestCase):
                     "cold_btc": 0.2,
                 },
             ),
-            patch("rebalancer.get_btc_cold_balance", return_value=0.2),
-            patch("rebalancer.get_btc_usd_price", return_value=100.0),
-            patch("rebalancer.update_sdca_values") as update_values,
+            patch("rebalancer.update_sdca_cash_in_sheet") as update_cash,
+            patch("rebalancer.update_current_allocations_in_sheet") as update_allocations,
         ):
             get_exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
             result = rebalancer.execute_sdca_trade("buy")
 
-        update_values.assert_called_once()
-        for actual, expected in zip(
-            update_values.call_args.args, (89.9, 0.15, 0.2, 100.0)
-        ):
-            self.assertAlmostEqual(actual, expected)
+        update_cash.assert_called_once_with(89.9)
+        update_allocations.assert_called_once_with(sdca_btc_adjustment=0.1)
         self.assertAlmostEqual(result["actual_quote_amount_usd"], 10.1)
 
     def test_sell_returns_actual_proceeds_and_reduces_tracked_btc(self):
@@ -148,18 +186,14 @@ class SdcaCashAccountingTests(unittest.TestCase):
                     "cold_btc": 0.2,
                 },
             ),
-            patch("rebalancer.get_btc_cold_balance", return_value=0.2),
-            patch("rebalancer.get_btc_usd_price", return_value=100.0),
-            patch("rebalancer.update_sdca_values") as update_values,
+            patch("rebalancer.update_sdca_cash_in_sheet") as update_cash,
+            patch("rebalancer.update_current_allocations_in_sheet") as update_allocations,
         ):
             get_exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
             result = rebalancer.execute_sdca_trade("sell", 50)
 
-        update_values.assert_called_once()
-        for actual, expected in zip(
-            update_values.call_args.args, (104.0, 0.06, 0.2, 100.0)
-        ):
-            self.assertAlmostEqual(actual, expected)
+        update_cash.assert_called_once_with(104.0)
+        update_allocations.assert_called_once_with(sdca_btc_adjustment=-0.04)
         self.assertAlmostEqual(result["actual_quote_amount_usd"], 4.0)
 
 
