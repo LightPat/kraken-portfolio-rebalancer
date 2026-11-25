@@ -134,7 +134,7 @@ class RebalancerMarginOrderTests(unittest.TestCase):
                 "rebalancer.get_sdca_sheet_values",
                 return_value={
                     "cash_usd": 0.0,
-                    "buy_pct": 0.0,
+                    "change_pct": 0.0,
                     "kraken_btc": 0.0,
                     "cold_btc": 0.0,
                 },

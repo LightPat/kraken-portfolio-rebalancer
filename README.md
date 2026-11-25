@@ -26,10 +26,12 @@ empty key is treated as a zero cold-wallet balance.
 
 SDCA trades are manual and require Telegram confirmation:
 
-- `/sdcaBuy` plans a buy using Q4 × Q3.
-- `/sdcaSell 25` plans to sell 25% of SDCA's BTC held on Kraken. BTC in cold
-  storage is never sold by the bot.
+- `/sdca` reads the signed decimal in Signals!Q4. Positive values buy that
+  fraction of Q3 (USD Left); negative values sell that fraction of total SDCA
+  BTC (Q7 + Q8). The bot sells only free BTC on Kraken and reports how much
+  more BTC must be moved from cold storage when the target exceeds the Kraken
+  balance.
 
 After an SDCA buy, the bot reports the filled BTC amount for manual withdrawal
 to cold storage. `/updateCurrentAllocations` refreshes the SDCA balance cells
-and records RSPS BTC quantity in E5.
+and records RSPS BTC quantity in E5.

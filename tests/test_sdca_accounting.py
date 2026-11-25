@@ -45,7 +45,7 @@ class CapitalSplitTests(unittest.TestCase):
                 "rebalancer.get_sdca_sheet_values",
                 return_value={
                     "cash_usd": 200.0,
-                    "buy_pct": 0.1,
+                    "change_pct": 0.1,
                     "kraken_btc": 0.0,
                     "cold_btc": 0.0,
                 },
@@ -58,6 +58,82 @@ class CapitalSplitTests(unittest.TestCase):
 
 
 class SdcaCashAccountingTests(unittest.TestCase):
+    def test_zero_change_returns_empty_plan_without_fetching_market(self):
+        with (
+            patch("rebalancer.update_current_allocations_in_sheet"),
+            patch("rebalancer.get_sdca_sheet_values", return_value={
+                "cash_usd": 20.0,
+                "change_pct": 0.0,
+                "kraken_btc": 0.1,
+                "cold_btc": 0.3,
+            }),
+            patch("rebalancer.get_kraken_exchange") as exchange,
+        ):
+            plan = rebalancer.generate_sdca_plan()
+
+        self.assertIsNone(plan["action"])
+        self.assertEqual(plan["amount_base"], 0.0)
+        exchange.assert_not_called()
+
+    def test_signed_negative_change_sells_percent_of_total_sdca_btc(self):
+        with (
+            patch("rebalancer.update_current_allocations_in_sheet"),
+            patch("rebalancer.get_sdca_sheet_values", return_value={
+                "cash_usd": 20.0,
+                "change_pct": -0.5,
+                "kraken_btc": 0.3,
+                "cold_btc": 0.1,
+            }),
+            patch("rebalancer.get_kraken_exchange") as exchange,
+            patch("rebalancer.get_best_trading_symbol", return_value="BTC/USD"),
+            patch("rebalancer.get_free_balance", return_value=0.15),
+        ):
+            exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
+            plan = rebalancer.generate_sdca_plan()
+
+        self.assertEqual(plan["action"], "sell")
+        self.assertAlmostEqual(plan["target_btc"], 0.2)
+        self.assertAlmostEqual(plan["amount_base"], 0.15)
+        self.assertAlmostEqual(plan["unavailable_btc"], 0.05)
+
+    def test_sell_does_not_use_free_btc_attributed_to_rsps(self):
+        with (
+            patch("rebalancer.update_current_allocations_in_sheet"),
+            patch("rebalancer.get_sdca_sheet_values", return_value={
+                "cash_usd": 20.0,
+                "change_pct": -0.5,
+                "kraken_btc": 0.1,
+                "cold_btc": 0.3,
+            }),
+            patch("rebalancer.get_kraken_exchange") as exchange,
+            patch("rebalancer.get_best_trading_symbol", return_value="BTC/USD"),
+            patch("rebalancer.get_free_balance", return_value=0.5),
+        ):
+            exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
+            plan = rebalancer.generate_sdca_plan()
+
+        self.assertAlmostEqual(plan["target_btc"], 0.2)
+        self.assertAlmostEqual(plan["amount_base"], 0.1)
+        self.assertAlmostEqual(plan["unavailable_btc"], 0.1)
+
+    def test_signed_positive_change_buys_percent_of_sdca_cash(self):
+        with (
+            patch("rebalancer.update_current_allocations_in_sheet"),
+            patch("rebalancer.get_sdca_sheet_values", return_value={
+                "cash_usd": 200.0,
+                "change_pct": 0.25,
+                "kraken_btc": 0.1,
+                "cold_btc": 0.3,
+            }),
+            patch("rebalancer.get_kraken_exchange") as exchange,
+            patch("rebalancer.get_best_trading_symbol", return_value="BTC/USD"),
+        ):
+            exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
+            plan = rebalancer.generate_sdca_plan()
+
+        self.assertEqual(plan["action"], "buy")
+        self.assertAlmostEqual(plan["amount_usd"], 50.0)
+
     def test_sdca_plan_refreshes_allocations_before_reading_plan_inputs(self):
         with (
             patch("rebalancer.update_current_allocations_in_sheet") as refresh,
@@ -66,7 +142,7 @@ class SdcaCashAccountingTests(unittest.TestCase):
                 "rebalancer.get_sdca_sheet_values",
                 return_value={
                     "cash_usd": 100.0,
-                    "buy_pct": 0.1,
+                    "change_pct": 0.1,
                     "kraken_btc": 0.0,
                     "cold_btc": 0.0,
                 },
@@ -74,7 +150,7 @@ class SdcaCashAccountingTests(unittest.TestCase):
             patch("rebalancer.get_best_trading_symbol", return_value="BTC/USD"),
         ):
             exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
-            result = rebalancer.generate_sdca_plan("buy")
+            result = rebalancer.generate_sdca_plan()
 
         refresh.assert_called_once_with()
         self.assertAlmostEqual(result["amount_usd"], 10.0)
@@ -91,7 +167,7 @@ class SdcaCashAccountingTests(unittest.TestCase):
             patch("rebalancer.generate_sdca_plan", return_value=plan),
             patch("rebalancer.update_current_allocations_in_sheet") as refresh,
         ):
-            result = rebalancer.execute_sdca_trade("buy")
+            result = rebalancer.execute_sdca_trade()
 
         refresh.assert_called_once_with()
         self.assertTrue(result["dry_run"])
@@ -114,6 +190,8 @@ class SdcaCashAccountingTests(unittest.TestCase):
             "symbol": "BTC/USD",
             "amount_usd": 10.0,
             "amount_base": 0.1,
+            "target_btc": 0.0,
+            "unavailable_btc": 0.0,
             "dry_run": False,
         }
         order = {
@@ -137,7 +215,7 @@ class SdcaCashAccountingTests(unittest.TestCase):
                 "rebalancer.get_sdca_sheet_values",
                 return_value={
                     "cash_usd": 100.0,
-                    "buy_pct": 0.1,
+                    "change_pct": 0.1,
                     "kraken_btc": 0.05,
                     "cold_btc": 0.2,
                 },
@@ -146,7 +224,7 @@ class SdcaCashAccountingTests(unittest.TestCase):
             patch("rebalancer.update_current_allocations_in_sheet") as update_allocations,
         ):
             get_exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
-            result = rebalancer.execute_sdca_trade("buy")
+            result = rebalancer.execute_sdca_trade()
 
         update_cash.assert_called_once_with(89.9)
         update_allocations.assert_called_once_with(
@@ -160,6 +238,9 @@ class SdcaCashAccountingTests(unittest.TestCase):
             "symbol": "BTC/USD",
             "amount_usd": 5.0,
             "amount_base": 0.05,
+            "target_btc": 0.05,
+            "unavailable_btc": 0.0,
+            "kraken_btc": 0.1,
             "dry_run": False,
         }
         order = {
@@ -183,7 +264,7 @@ class SdcaCashAccountingTests(unittest.TestCase):
                 "rebalancer.get_sdca_sheet_values",
                 return_value={
                     "cash_usd": 100.0,
-                    "buy_pct": 0.1,
+                    "change_pct": -0.5,
                     "kraken_btc": 0.1,
                     "cold_btc": 0.2,
                 },
@@ -192,13 +273,19 @@ class SdcaCashAccountingTests(unittest.TestCase):
             patch("rebalancer.update_current_allocations_in_sheet") as update_allocations,
         ):
             get_exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
-            result = rebalancer.execute_sdca_trade("sell", 50)
+            result = rebalancer.execute_sdca_trade()
 
         update_cash.assert_called_once_with(104.0)
         update_allocations.assert_called_once_with(
             sdca_btc_adjustment=-0.04, force_cold_balance_refresh=True
         )
         self.assertAlmostEqual(result["actual_quote_amount_usd"], 4.0)
+        self.assertTrue(
+            any("$4.00 proceeds" in line for line in result["results"])
+        )
+        self.assertTrue(
+            any("0.01000000 BTC" in line for line in result["results"])
+        )
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from embit import bip32, networks
 from sheets import (
     clear_btc_cold_balance_cache,
     get_btc_cold_balance,
+    get_sdca_sheet_values,
     update_current_allocations_in_sheet,
     update_sdca_cash_in_sheet,
 )
@@ -35,7 +36,7 @@ class UpdateCurrentAllocationsTests(unittest.TestCase):
                 "sheets.get_sdca_sheet_values",
                 return_value={
                     "cash_usd": 0.0,
-                    "buy_pct": 0.1,
+                    "change_pct": 0.1,
                     "kraken_btc": 0.0,
                     "cold_btc": 0.0,
                 },
@@ -73,7 +74,7 @@ class UpdateCurrentAllocationsTests(unittest.TestCase):
                 "sheets.get_sdca_sheet_values",
                 return_value={
                     "cash_usd": 100.0,
-                    "buy_pct": 0.1,
+                    "change_pct": 0.1,
                     "kraken_btc": 0.1,
                     "cold_btc": 0.2,
                 },
@@ -100,6 +101,23 @@ class UpdateCurrentAllocationsTests(unittest.TestCase):
 
 
 class SdcaSheetTests(unittest.TestCase):
+    def test_sdca_sheet_reader_accepts_signed_decimal_change(self):
+        worksheet = Mock()
+        worksheet.acell.side_effect = lambda cell: Mock(
+            value={
+                "Q3": "125.50",
+                "Q4": "-0.25",
+                "Q7": "0.1",
+                "Q8": "0.2",
+            }[cell]
+        )
+
+        with patch("sheets._get_signals_worksheet", return_value=worksheet):
+            values = get_sdca_sheet_values()
+
+        self.assertEqual(values["change_pct"], -0.25)
+        self.assertEqual(values["cash_usd"], 125.5)
+
     def test_cash_update_writes_only_q3(self):
         worksheet = Mock()
         client = Mock()
@@ -215,7 +233,7 @@ class SdcaSheetTests(unittest.TestCase):
                 patch("sheets.fetch_portfolio", return_value=portfolio),
                 patch("sheets.get_sdca_sheet_values", return_value={
                     "cash_usd": 0.0,
-                    "buy_pct": 0.1,
+                    "change_pct": 0.1,
                     "kraken_btc": 0.0,
                     "cold_btc": 0.0,
                 }),
@@ -302,7 +320,7 @@ class SdcaSheetTests(unittest.TestCase):
                 "sheets.get_sdca_sheet_values",
                 return_value={
                     "cash_usd": 0.0,
-                    "buy_pct": 0.1,
+                    "change_pct": 0.1,
                     "kraken_btc": 1.0,
                     "cold_btc": 0.0,
                 },

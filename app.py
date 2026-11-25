@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field
-from typing import Literal
+from pydantic import BaseModel
 import os
 import time
 from pathlib import Path
@@ -54,10 +53,6 @@ class PlanResponse(BaseModel):
     current_portfolio: dict
     plan: list
     dry_run: bool
-
-
-class SDCAExecuteRequest(BaseModel):
-    sell_percentage: float | None = Field(default=None, gt=0, le=100)
 
 
 @app.get("/health")
@@ -127,24 +122,20 @@ async def execute_rebalance():
         raise HTTPException(status_code=409, detail=message)
 
 
-@app.get("/sdca/{action}/plan", dependencies=[Depends(get_api_key)])
-async def get_sdca_plan(
-    action: Literal["buy", "sell"], sell_percentage: float | None = None
-):
+@app.get("/sdca/plan", dependencies=[Depends(get_api_key)])
+async def get_sdca_plan():
     try:
-        return generate_sdca_plan(action, sell_percentage)
+        return generate_sdca_plan()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/sdca/{action}/execute", dependencies=[Depends(get_api_key)])
-async def execute_sdca(
-    action: Literal["buy", "sell"], data: SDCAExecuteRequest
-):
+@app.post("/sdca/execute", dependencies=[Depends(get_api_key)])
+async def execute_sdca():
     try:
         with rebalance_lock.acquire(timeout=REBALANCE_LOCK_TIMEOUT_SECONDS):
             reset_cancel_rebalance()
-            return execute_sdca_trade(action, data.sell_percentage)
+            return execute_sdca_trade()
     except Timeout as exc:
         raise HTTPException(
             status_code=409,
