@@ -1,9 +1,14 @@
 import os
 import re
 import json
+import httpx
 import gspread
 from typing import Dict, Tuple, TypedDict
-from kraken import fetch_portfolio
+from kraken import (
+    fetch_portfolio,
+    get_btc_usd_price,
+    get_kraken_btc_balance,
+)
 from oauth2client.service_account import ServiceAccountCredentials
 
 # Global cached client
@@ -120,7 +125,7 @@ def get_target_allocations() -> dict[str, TargetAllocation]:
     return targets
 
 
-def _parse_sheet_numeric_value(val) -> float:
+def _parse_sheet_numeric_value(val, cell: str = "I3") -> float:
     """Parse a numeric value from a sheet cell, stripping currency formatting."""
     if val is None or val == "":
         return 0.0
@@ -131,8 +136,8 @@ def _parse_sheet_numeric_value(val) -> float:
         try:
             return float(cleaned)
         except ValueError:
-            raise ValueError(f"Expected a numeric reserve value in I3, got: {val!r}")
-    raise ValueError(f"Unsupported reserve cell type: {type(val).__name__}")
+            raise ValueError(f"Expected a numeric value in {cell}, got: {val!r}")
+    raise ValueError(f"Unsupported value in {cell}: {type(val).__name__}")
 
 
 def get_desired_cash_reserve() -> float:
@@ -149,6 +154,109 @@ def get_desired_cash_reserve() -> float:
     worksheet = gc.open_by_key(spreadsheet_id).worksheet("Signals")
     value = worksheet.acell("I3").value
     return _parse_sheet_numeric_value(value)
+
+
+def _get_signals_worksheet():
+    spreadsheet_id = os.getenv("GOOGLE_DOCS_SHEET_ID")
+    if not spreadsheet_id:
+        raise ValueError("GOOGLE_DOCS_SHEET_ID not set in .env")
+
+    return get_gspread_client().open_by_key(spreadsheet_id).worksheet("Signals")
+
+
+def _parse_fraction_cell(value, cell: str) -> float:
+    if value is None or value == "":
+        raise ValueError(f"{cell} is empty")
+    if isinstance(value, str) and not value.strip().endswith("%"):
+        try:
+            parsed = float(value.strip())
+        except ValueError as exc:
+            raise ValueError(f"Expected a percentage in {cell}, got: {value!r}") from exc
+        if not 0 <= parsed <= 1:
+            raise ValueError(f"Expected {cell} between 0 and 1, got: {value!r}")
+        return parsed
+    parsed = _parse_target_percentage(value)
+    if not 0 <= parsed <= 1:
+        raise ValueError(f"Expected {cell} between 0 and 1, got: {value!r}")
+    return parsed
+
+
+def get_rsps_allocation_pct() -> float:
+    """Return the RSPS share from Signals!N2 as a decimal fraction."""
+    value = _get_signals_worksheet().acell("N2").value
+    return _parse_fraction_cell(value, "N2")
+
+
+def get_sdca_sheet_values() -> dict[str, float]:
+    """Read SDCA's cash, daily buy fraction, and tracked BTC balances."""
+    worksheet = _get_signals_worksheet()
+    cash = _parse_sheet_numeric_value(worksheet.acell("Q3").value, "Q3")
+    buy_pct = _parse_fraction_cell(worksheet.acell("Q4").value, "Q4")
+    kraken_btc = _parse_sheet_numeric_value(worksheet.acell("Q7").value, "Q7")
+    cold_btc = _parse_sheet_numeric_value(worksheet.acell("Q8").value, "Q8")
+    if kraken_btc < 0 or cold_btc < 0:
+        raise ValueError("SDCA BTC balances must not be negative")
+    return {
+        "cash_usd": cash,
+        "buy_pct": buy_pct,
+        "kraken_btc": kraken_btc,
+        "cold_btc": cold_btc,
+    }
+
+
+def get_btc_cold_balance() -> float:
+    """Sum confirmed and unconfirmed BTC balances for configured cold addresses."""
+    addresses = [
+        address.strip()
+        for address in os.getenv("BTC_COLD_ADDRESS", "").split(",")
+        if address.strip()
+    ]
+    addresses = list(dict.fromkeys(addresses))
+    if not addresses:
+        raise ValueError("BTC_COLD_ADDRESS is not set in .env")
+
+    total_satoshis = 0
+    for address in addresses:
+        response = httpx.get(
+            f"https://mempool.space/api/address/{address}", timeout=15.0
+        )
+        response.raise_for_status()
+        data = response.json()
+        for stats_key in ("chain_stats", "mempool_stats"):
+            stats = data.get(stats_key)
+            if not isinstance(stats, dict) or not {
+                "funded_txo_sum",
+                "spent_txo_sum",
+            }.issubset(stats):
+                raise ValueError(
+                    f"Blockchain API response is missing {stats_key} for {address}"
+                )
+            total_satoshis += int(stats["funded_txo_sum"])
+            total_satoshis -= int(stats["spent_txo_sum"])
+    if total_satoshis < 0:
+        raise ValueError("Blockchain API returned a negative BTC address balance")
+    return total_satoshis / 100_000_000
+
+
+def update_sdca_values(
+    cash_usd: float, kraken_btc: float, cold_btc: float, btc_price: float
+) -> float:
+    """Write SDCA balances without changing sheet formulas or strategy splits."""
+    if min(kraken_btc, cold_btc) < 0 or btc_price <= 0:
+        raise ValueError("SDCA BTC balances must be non-negative and BTC price positive")
+
+    equity_usd = round(cash_usd + (kraken_btc + cold_btc) * btc_price, 2)
+    worksheet = _get_signals_worksheet()
+    worksheet.batch_update(
+        [
+            {"range": "Q3", "values": [[cash_usd]]},
+            {"range": "Q7", "values": [[kraken_btc]]},
+            {"range": "Q8", "values": [[cold_btc]]},
+            {"range": "Q10", "values": [[equity_usd]]},
+        ],
+        value_input_option="RAW",
+    )
+    return equity_usd
 
 
 def update_current_allocations_in_sheet():
@@ -176,12 +284,36 @@ def update_current_allocations_in_sheet():
         total_value,
         stable_breakdown,
     ) = fetch_portfolio()
+    sdca_values = get_sdca_sheet_values()
+    stable_breakdown = dict(stable_breakdown)
+    stable_breakdown["USD"] = max(
+        0.0,
+        stable_breakdown.get("USD", 0.0) - max(0.0, sdca_values["cash_usd"]),
+    )
+    cold_btc = get_btc_cold_balance()
+    btc_price = get_btc_usd_price()
+    sdca_total_btc = sdca_values["kraken_btc"] + sdca_values["cold_btc"]
+    sdca_kraken_btc = round(max(0.0, sdca_total_btc - cold_btc), 8)
+    kraken_btc = get_kraken_btc_balance()
+    if sdca_kraken_btc > kraken_btc + 1e-8:
+        raise ValueError(
+            "Tracked SDCA BTC on Kraken exceeds the actual Kraken BTC balance"
+        )
+    rsps_btc = round(kraken_btc - sdca_kraken_btc, 8)
+    update_sdca_values(
+        sdca_values["cash_usd"], sdca_kraken_btc, cold_btc, btc_price
+    )
+
     current_values = dict(spot_value_by_asset)
     for asset, used_margin in short_used_margin_by_asset.items():
         current_values[asset] = current_values.get(asset, 0.0) + used_margin
+    current_values["BTC"] = (
+        rsps_btc * btc_price + short_used_margin_by_asset.get("BTC", 0.0)
+    )
 
     gc = get_gspread_client()
     worksheet = gc.open_by_key(spreadsheet_id).worksheet("Signals")
+    worksheet.update("E5", [[rsps_btc]], value_input_option="RAW")
 
     # Read only Column A (assets)
     asset_rows = worksheet.get_values("A8:A")

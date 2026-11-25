@@ -130,6 +130,15 @@ class RebalancerMarginOrderTests(unittest.TestCase):
             patch("rebalancer.get_kraken_exchange"),
             patch("rebalancer.cancel_open_orders", return_value=[]) as cancel,
             patch("rebalancer.validate_quote_balances", return_value=[]),
+            patch(
+                "rebalancer.get_sdca_sheet_values",
+                return_value={
+                    "cash_usd": 0.0,
+                    "buy_pct": 0.0,
+                    "kraken_btc": 0.0,
+                    "cold_btc": 0.0,
+                },
+            ),
             patch("rebalancer._submit_trade_orders", return_value=[]),
             patch("rebalancer.generate_rebalance_plan", return_value={"plan": []}),
             patch("rebalancer.is_rebalance_cancel_requested", return_value=False),

@@ -32,7 +32,8 @@ PRICE_DECIMALS = 4
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Kraken Rebalancer ready!\n\nCommands:\n/rebalance\n\n/updateCurrentAllocations"
+        "🤖 Kraken Rebalancer ready!\n\nCommands:\n"
+        "/rebalance\n/sdcaBuy\n/sdcaSell <percent>\n\n/updateCurrentAllocations"
     )
 
 
@@ -145,6 +146,81 @@ async def rebalance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def sdca_buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _sdca_plan_command(update, "buy")
+
+
+async def sdca_sell_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /sdcaSell <percent, from 0 to 100>")
+        return
+    try:
+        sell_percentage = float(context.args[0].rstrip("%"))
+    except ValueError:
+        await update.message.reply_text("Enter a valid sell percentage.")
+        return
+    if not 0 < sell_percentage <= 100:
+        await update.message.reply_text("Sell percentage must be greater than 0 and at most 100.")
+        return
+    await _sdca_plan_command(update, "sell", sell_percentage)
+
+
+async def _sdca_plan_command(
+    update: Update, action: str, sell_percentage: float | None = None
+):
+    if update.effective_user.id != ALLOWED_USER_ID:
+        await update.message.reply_text("❌ Unauthorized")
+        return
+
+    status_message = await update.message.reply_text(
+        f"🔄 Preparing SDCA {action} plan..."
+    )
+    try:
+        timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS)
+        params = (
+            {"sell_percentage": sell_percentage} if sell_percentage is not None else {}
+        )
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(
+                f"{FASTAPI_URL}/sdca/{action}/plan",
+                params=params,
+                headers={"X-API-Key": REBALANCER_API_KEY},
+            )
+            resp.raise_for_status()
+            plan = resp.json()
+    except Exception as e:
+        await status_message.edit_text(
+            f"❌ Failed to get SDCA plan: {type(e).__name__}: {e}"
+        )
+        return
+
+    if plan["amount_base"] <= 0:
+        await status_message.edit_text(f"✅ No SDCA {action} to execute.")
+        return
+
+    description = (
+        f"📊 SDCA {action.upper()} Plan\n"
+        f"• BTC amount: {plan['amount_base']:.8f}\n"
+        f"• Approximate value: ${plan['amount_usd']:.2f}\n"
+        f"• USD Left: ${plan['cash_usd']:.2f}\n"
+        f"• BTC on Kraken: {plan['kraken_btc']:.8f}\n"
+        f"DRY_RUN = {plan['dry_run']}\n\n"
+        "Execute this SDCA trade?"
+    )
+    callback_data = (
+        "sdca_buy_confirm"
+        if action == "buy"
+        else f"sdca_sell_confirm_{sell_percentage}"
+    )
+    keyboard = [[
+        InlineKeyboardButton("✅ Execute", callback_data=callback_data),
+        InlineKeyboardButton("❌ Cancel", callback_data="sdca_cancel"),
+    ]]
+    await status_message.edit_text(
+        description, reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -156,6 +232,50 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "cancel":
         await query.edit_message_text("❌ Rebalance cancelled.")
+        return
+
+    if query.data == "sdca_cancel":
+        await query.edit_message_text("❌ SDCA trade cancelled.")
+        return
+
+    if query.data == "sdca_buy_confirm" or query.data.startswith(
+        "sdca_sell_confirm_"
+    ):
+        action = "buy" if query.data == "sdca_buy_confirm" else "sell"
+        sell_percentage = None
+        if action == "sell":
+            try:
+                sell_percentage = float(query.data.removeprefix("sdca_sell_confirm_"))
+            except ValueError:
+                await query.edit_message_text("❌ Invalid SDCA sell confirmation.")
+                return
+
+        await query.edit_message_text(f"🔄 SDCA {action} in progress...")
+        try:
+            timeout = httpx.Timeout(
+                EXECUTE_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS
+            )
+            payload = (
+                {"sell_percentage": sell_percentage}
+                if sell_percentage is not None
+                else {}
+            )
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    f"{FASTAPI_URL}/sdca/{action}/execute",
+                    json=payload,
+                    headers={"X-API-Key": REBALANCER_API_KEY},
+                )
+                resp.raise_for_status()
+                result = resp.json()
+        except Exception as e:
+            await query.edit_message_text(
+                f"❌ SDCA execute failed: {type(e).__name__}: {e}"
+            )
+            return
+
+        result_text = "\n".join(result.get("results", ["No details returned"]))
+        await query.edit_message_text(f"🚀 SDCA {action} complete!\n\n{result_text}")
         return
 
     if query.data == "confirm":
@@ -221,6 +341,10 @@ def main():
         CommandHandler("updateCurrentAllocations", update_current_allocations_command)
     )
     app.add_handler(CommandHandler("rebalance", rebalance_command))
+    app.add_handler(CommandHandler("sdcaBuy", sdca_buy_command))
+    app.add_handler(CommandHandler("sdcaSell", sdca_sell_command))
+    app.add_handler(CommandHandler("sdcabuy", sdca_buy_command))
+    app.add_handler(CommandHandler("sdcasell", sdca_sell_command))
     app.add_handler(CommandHandler("cancelRebalance", cancel_rebalance_command))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(

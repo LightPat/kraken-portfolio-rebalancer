@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Literal
 import os
 import time
 from pathlib import Path
@@ -10,6 +11,8 @@ from rebalancer import (
     execute_trades,
     request_cancel_rebalance,
     reset_cancel_rebalance,
+    generate_sdca_plan,
+    execute_sdca_trade,
 )
 from sheets import update_current_allocations_in_sheet
 from kraken import cancel_open_orders
@@ -51,6 +54,10 @@ class PlanResponse(BaseModel):
     current_portfolio: dict
     plan: list
     dry_run: bool
+
+
+class SDCAExecuteRequest(BaseModel):
+    sell_percentage: float | None = Field(default=None, gt=0, le=100)
 
 
 @app.get("/health")
@@ -116,6 +123,33 @@ async def execute_rebalance():
         if age is not None:
             message += f" (lock file age: {age}s)"
         raise HTTPException(status_code=409, detail=message)
+
+
+@app.get("/sdca/{action}/plan", dependencies=[Depends(get_api_key)])
+async def get_sdca_plan(
+    action: Literal["buy", "sell"], sell_percentage: float | None = None
+):
+    try:
+        return generate_sdca_plan(action, sell_percentage)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/sdca/{action}/execute", dependencies=[Depends(get_api_key)])
+async def execute_sdca(
+    action: Literal["buy", "sell"], data: SDCAExecuteRequest
+):
+    try:
+        with rebalance_lock.acquire(timeout=REBALANCE_LOCK_TIMEOUT_SECONDS):
+            reset_cancel_rebalance()
+            return execute_sdca_trade(action, data.sell_percentage)
+    except Timeout as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="A rebalance or SDCA trade is already running. Please try again later.",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class SignalUpdateRequest(BaseModel):

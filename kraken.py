@@ -104,6 +104,33 @@ def get_best_trading_symbol(asset: str) -> str:
     raise ValueError(f"No active trading pair found for {asset} against any stablecoin")
 
 
+def get_btc_usd_price() -> float:
+    """Return Kraken's current BTC/USD price."""
+    exchange = get_kraken_exchange()
+    symbol = get_best_trading_symbol("BTC")
+    if _quote_currency(symbol) != "USD":
+        raise ValueError(f"Kraken does not have a BTC/USD market; selected {symbol}")
+    ticker = exchange.fetch_ticker(symbol)
+    price = ticker.get("last") or ticker.get("close")
+    if price is None or float(price) <= 0:
+        raise ValueError(f"No valid BTC price available for {symbol}")
+    return float(price)
+
+
+def get_kraken_btc_balance() -> float:
+    """Return the total BTC balance held on Kraken, including locked funds."""
+    balance = get_kraken_exchange().fetch_balance()
+    total = balance.get("total") or {}
+    if "BTC" in total and total["BTC"] is not None:
+        amount = float(total["BTC"])
+    else:
+        free = balance.get("free") or {}
+        amount = float(free.get("BTC") or 0.0)
+    if amount < 0:
+        raise ValueError(f"Kraken returned a negative BTC balance: {amount}")
+    return amount
+
+
 def fetch_tickers_batch(symbols: List[str]) -> Dict[str, float]:
     """Fetch multiple tickers in one API call. Returns {symbol: last_price}."""
     if not symbols:
@@ -527,13 +554,19 @@ def cancel_open_orders(symbols: List[str] | None = None) -> List[str]:
     return cancelled
 
 
-def validate_quote_balances(plan: List[Dict]) -> List[str]:
-    """Check available quote funds for short collateral and spot buys."""
+def validate_quote_balances(
+    plan: List[Dict], reserved_quote_balances: Dict[str, float] | None = None
+) -> List[str]:
+    """Check available quote funds after preserving other strategies' reserves."""
     warnings = []
     # Start with current free balances for stables only
     exchange = get_kraken_exchange()
     balance = exchange.fetch_balance()["free"]
     projected = {s: balance.get(s, 0.0) for s in STABLE_COINS}
+    for quote, amount in (reserved_quote_balances or {}).items():
+        quote = quote.upper()
+        if quote in projected:
+            projected[quote] = max(0.0, projected[quote] - max(0.0, amount))
     reserved_short_proceeds = {s: 0.0 for s in STABLE_COINS}
 
     for position in fetch_margin_positions():
