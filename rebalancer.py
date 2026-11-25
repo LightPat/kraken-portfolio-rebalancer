@@ -138,7 +138,9 @@ def generate_rebalance_plan() -> Dict[str, Any]:
 
                 short_capital_delta = target_capital_usd - current_short_margin_usd
                 if short_capital_delta < 0:
-                    capital_to_release = min(-short_capital_delta, current_short_margin_usd)
+                    capital_to_release = min(
+                        -short_capital_delta, current_short_margin_usd
+                    )
                     remaining_capital = capital_to_release
                     for position in short_positions:
                         if remaining_capital <= 0:
@@ -202,9 +204,7 @@ def generate_rebalance_plan() -> Dict[str, Any]:
                     amount_usd = min(-delta_long_usd, current_spot_usd)
                     append_trade(
                         asset,
-                        "close_long"
-                        if target_capital_usd == 0
-                        else "reduce_long",
+                        "close_long" if target_capital_usd == 0 else "reduce_long",
                         amount_usd,
                         amount_usd / price,
                         price,
@@ -358,25 +358,39 @@ def _wait_for_order_completion(
     start_time = time.monotonic()
 
     remaining_orders = [order.copy() for order in submitted_orders]
+    fallback_orders = []
     while time.monotonic() - start_time < timeout_seconds:
         if is_rebalance_cancel_requested():
             results.append(
                 "⏹️ Rebalance cancellation requested, stopping order monitoring."
             )
-            return remaining_orders
+            return fallback_orders + remaining_orders
 
         open_orders = get_open_orders(symbols)
         open_ids = {order["id"] for order in open_orders}
-        remaining_orders = [
-            order for order in remaining_orders if order["order_id"] in open_ids
-        ]
+        still_open_orders = []
+        for order in remaining_orders:
+            if order["order_id"] in open_ids:
+                still_open_orders.append(order)
+                continue
+
+            order_info = fetch_order(order["order_id"], order["symbol"])
+            status = str(order_info.get("status", "")).lower() if order_info else ""
+            if (
+                order_info is None
+                or status in {"canceled", "cancelled", "expired"}
+                or get_order_remaining(order_info) > 0
+            ):
+                fallback_orders.append(order)
+
+        remaining_orders = still_open_orders
 
         if not remaining_orders:
-            return []
+            return fallback_orders
 
         time.sleep(poll_interval_seconds)
 
-    return remaining_orders
+    return fallback_orders + remaining_orders
 
 
 def _cancel_and_market_fallback(orders: List[Dict], results: List[str]):
@@ -386,9 +400,7 @@ def _cancel_and_market_fallback(orders: List[Dict], results: List[str]):
 
         order_info = fetch_order(order["order_id"], order["symbol"])
         remaining = (
-            get_order_remaining(order_info)
-            if order_info
-            else order["amount_base"]
+            get_order_remaining(order_info) if order_info else order["amount_base"]
         )
         if remaining <= 0:
             continue
@@ -450,25 +462,21 @@ def execute_trades(plan: List[Dict]):
         submitted_orders = _submit_trade_orders(exchange, trades, dry_run, results)
         if dry_run:
             return True
-        timed_out_orders = _wait_for_order_completion(
+        orders_needing_fallback = _wait_for_order_completion(
             submitted_orders,
             results,
             timeout_seconds=ORDER_TIMEOUT_SECONDS,
             poll_interval_seconds=ORDER_POLL_INTERVAL_SECONDS,
         )
-        if timed_out_orders:
-            _cancel_and_market_fallback(timed_out_orders, results)
+        if orders_needing_fallback:
+            _cancel_and_market_fallback(orders_needing_fallback, results)
         return not is_rebalance_cancel_requested()
 
     short_reductions = [
-        trade
-        for trade in plan
-        if trade["action"] in {"reduce_short", "cover_short"}
+        trade for trade in plan if trade["action"] in {"reduce_short", "cover_short"}
     ]
     long_reductions = [
-        trade
-        for trade in plan
-        if trade["action"] in {"reduce_long", "close_long"}
+        trade for trade in plan if trade["action"] in {"reduce_long", "close_long"}
     ]
 
     if short_reductions:

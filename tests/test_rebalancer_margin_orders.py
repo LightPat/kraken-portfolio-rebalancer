@@ -29,9 +29,7 @@ class RebalancerMarginOrderTests(unittest.TestCase):
                 return_value={"id": "order-1"},
             ) as create_order,
         ):
-            orders = rebalancer._submit_trade_orders(
-                exchange, [trade], False, []
-            )
+            orders = rebalancer._submit_trade_orders(exchange, [trade], False, [])
 
         self.assertEqual(orders[0]["symbol"], "ETH/USD:BTNL")
         create_order.assert_called_once_with(
@@ -64,6 +62,66 @@ class RebalancerMarginOrderTests(unittest.TestCase):
         create_market.assert_called_once_with(
             "ETH/USD:BTNL", "buy", 2, margin=True, reduce_only=True
         )
+
+    def test_terminal_order_needing_fallback_is_returned(self):
+        order = {
+            "order_id": "order-1",
+            "symbol": "ETH/USD:BTNL",
+            "side": "buy",
+            "amount_base": 2,
+            "asset": "ETH",
+            "action": "cover_short",
+            "margin": True,
+            "reduce_only": True,
+        }
+        final_statuses = [
+            None,
+            {"status": "canceled", "amount": 2, "filled": 2},
+            {"status": "expired", "amount": 2, "filled": 2},
+            {"status": "closed", "amount": 2, "filled": 1},
+        ]
+
+        for final_status in final_statuses:
+            with (
+                self.subTest(final_status=final_status),
+                patch("rebalancer.is_rebalance_cancel_requested", return_value=False),
+                patch("rebalancer.get_open_orders", return_value=[]),
+                patch(
+                    "rebalancer.fetch_order", return_value=final_status
+                ) as fetch_order,
+            ):
+                fallback_orders = rebalancer._wait_for_order_completion(
+                    [order], [], timeout_seconds=10, poll_interval_seconds=0
+                )
+
+            self.assertEqual(fallback_orders, [order])
+            fetch_order.assert_called_once_with("order-1", "ETH/USD:BTNL")
+
+    def test_filled_order_missing_from_open_orders_needs_no_fallback(self):
+        order = {
+            "order_id": "order-1",
+            "symbol": "ETH/USD:BTNL",
+            "side": "buy",
+            "amount_base": 2,
+            "asset": "ETH",
+            "action": "cover_short",
+            "margin": True,
+            "reduce_only": True,
+        }
+
+        with (
+            patch("rebalancer.is_rebalance_cancel_requested", return_value=False),
+            patch("rebalancer.get_open_orders", return_value=[]),
+            patch(
+                "rebalancer.fetch_order",
+                return_value={"status": "closed", "amount": 2, "filled": 2},
+            ),
+        ):
+            fallback_orders = rebalancer._wait_for_order_completion(
+                [order], [], timeout_seconds=10, poll_interval_seconds=0
+            )
+
+        self.assertEqual(fallback_orders, [])
 
     def test_cleanup_includes_spot_and_margin_symbols(self):
         plan = [{"symbol": "ETH/USD", "action": "reduce_short"}]
