@@ -295,12 +295,36 @@ def parse_signal_update(text: str) -> Dict[str, Tuple[float, str]]:
     return targets
 
 
+def _direction_format_request(sheet_id: int, row: int, direction: str) -> dict:
+    source_row = 1 if direction == "Long" else 2
+    return {
+        "copyPaste": {
+            "source": {
+                "sheetId": sheet_id,
+                "startRowIndex": source_row,
+                "endRowIndex": source_row + 1,
+                "startColumnIndex": 10,
+                "endColumnIndex": 11,
+            },
+            "destination": {
+                "sheetId": sheet_id,
+                "startRowIndex": row - 1,
+                "endRowIndex": row,
+                "startColumnIndex": 1,
+                "endColumnIndex": 2,
+            },
+            "pasteType": "PASTE_FORMAT",
+            "pasteOrientation": "NORMAL",
+        }
+    }
+
+
 def update_targets_from_signal(signal_text: str) -> dict:
     """Parse signal and update (or append) target % in Google Sheet 'Signals' worksheet.
     - If NO valid targets → treat as 100% CASH and zero out Column C for ALL existing assets.
     - For NEW assets: full row copy (A:F) + explicitly fix Column D formula to =B2*C{row}
       (copy-paste was auto-incrementing B3 → B2, so we force the correct reference).
-    - Column B stays "Long" (capitalized as requested).
+    - Column B uses the Long/Short direction and matching format from K2/K3.
     - Uses USER_ENTERED everywhere → no backticks.
     """
     targets = parse_signal_update(signal_text)
@@ -338,12 +362,16 @@ def update_targets_from_signal(signal_text: str) -> dict:
     # === NORMAL CASE (assets in signal) ===
     updates = []
     new_rows_data = []
+    direction_format_requests = []
     for asset, (pct, direction) in targets.items():
         pct_str = f"{pct * 100:.1f}%"
         if asset in existing:
             row = existing[asset]
             updates.append(
                 {"range": f"B{row}:C{row}", "values": [[direction, pct_str]]}
+            )
+            direction_format_requests.append(
+                _direction_format_request(worksheet.id, row, direction)
             )
         else:
             new_rows_data.append([asset, direction, pct_str])
@@ -408,10 +436,16 @@ def update_targets_from_signal(signal_text: str) -> dict:
                 [[f"=B2*C{current_new_row}"]],
                 value_input_option="USER_ENTERED",
             )
+            direction_format_requests.append(
+                _direction_format_request(worksheet.id, current_new_row, direction)
+            )
 
         results.append(
             f"✅ Added {len(new_rows_data)} new asset(s) with full row copy + fixed D formula"
         )
+
+    if direction_format_requests:
+        worksheet.spreadsheet.batch_update({"requests": direction_format_requests})
 
     total = sum(pct for pct, _ in targets.values())
     results.append(f"📊 New targets sum: {total:.1%} ({len(targets)} assets)")
