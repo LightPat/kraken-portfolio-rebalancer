@@ -2,12 +2,17 @@ import os
 import re
 import json
 import gspread
-from typing import Dict, Tuple
+from typing import Dict, Tuple, TypedDict
 from kraken import fetch_portfolio
 from oauth2client.service_account import ServiceAccountCredentials
 
 # Global cached client
 _gspread_client = None
+
+
+class TargetAllocation(TypedDict):
+    pct: float
+    direction: str
 
 
 def get_gspread_client():
@@ -54,22 +59,25 @@ def _parse_target_percentage(val) -> float:
         val = float(val)
         return val / 100 if val > 1 else val
     if isinstance(val, str):
-        val = val.strip().rstrip("%").strip()
+        s = val.strip()
+        has_percent = s.endswith("%")
+        s = s.rstrip("%").strip()
         try:
-            pct = float(val)
-            return pct / 100 if pct > 1 else pct
+            pct = float(s)
+            return pct / 100 if has_percent or pct > 1 else pct
         except ValueError:
             return 0.0
     return 0.0
 
 
-def get_target_allocations() -> dict[str, float]:
-    """Return {ASSET: target_percentage} from Google Sheet.
+def get_target_allocations() -> dict[str, TargetAllocation]:
+    """Return {ASSET: {pct, direction}} from Google Sheet.
 
-    Expects rows like ['BTC', 'Long', '0.0%'] or ['ETH', 'Long', '40%'] starting from row 8 in "Signals" sheet.
+    Expects rows like ['BTC', 'Long', '0.0%'] or ['ETH', 'Short', '25%']
+    starting from row 8 in "Signals" sheet.
     - Column A: Asset
-    - Column B: Direction (e.g. Long) - ignored for now
-    - Column C: Target percentage string like '0.0%' or '40%'
+    - Column B: Direction (Long or Short)
+    - Column C: Positive target percentage
     Stops at the first empty row in Column A.
     Percentages converted to decimal (0.0 - 1.0).
     """
@@ -83,9 +91,8 @@ def get_target_allocations() -> dict[str, float]:
     # Fetch only the needed columns starting at row 8 (one API call)
     values = worksheet.get_values("A8:C")
 
-    targets = {}
-    for row in values:
-        # row[0] = Column A (Asset), row[2] = Column C (Percentage)
+    targets: dict[str, TargetAllocation] = {}
+    for row_number, row in enumerate(values, start=8):
         if not row or len(row) == 0:
             break
 
@@ -93,20 +100,22 @@ def get_target_allocations() -> dict[str, float]:
         if not asset:
             break  # Stop at the first empty asset row (as requested)
 
-        # Parse percentage from column C, handling 'XX%' format
+        direction_raw = str(row[1] if len(row) > 1 else "").strip().lower()
+        direction = "Short" if direction_raw == "short" else "Long"
+
         pct_str = row[2] if len(row) > 2 else None
         pct = _parse_target_percentage(pct_str)
-        if pct >= 0:
-            targets[asset] = pct
-        else:
+        if pct < 0:
             print(
-                f"⚠️  Warning: Invalid target percentage '{pct_str}' for asset '{asset}' - defaulting to 0%"
+                f"⚠️  Warning: Negative target percentage '{pct_str}' for "
+                f"asset '{asset}' in row {row_number} - setting to 0%"
             )
-            targets[asset] = 0.0
+            pct = 0.0
+        targets[asset] = {"pct": pct, "direction": direction}
 
-    total = sum(targets.values())
+    total = sum(target["pct"] for target in targets.values())
     if abs(total - 1.0) > 0.02:
-        print(f"⚠️  Warning: Target percentages sum to {total:.2f}, not 1.0")
+        print(f"⚠️  Warning: Long + Short capital allocations sum to {total:.2f}, not 1.0")
 
     return targets
 
@@ -143,24 +152,33 @@ def get_desired_cash_reserve() -> float:
 
 
 def update_current_allocations_in_sheet():
-    """Update the 'Current' column (Column E) in the Google Sheet with current USD values.
+    """Update Column E with current allocation capital in USD.
 
-    For each asset listed in Column A (starting at row 8), this puts the total USD value
-    of your holdings (quantity x current price) into Column E.
+    Spot holdings and short used margin are both positive.
 
     Example:
       - You hold 2 SOL and SOL price = $95.40 → cell gets 190.8 (raw number)
+      - A $15,000 short using $7,500 margin → cell gets 7500
       - Sheet can be formatted as Currency / Number with 2 decimals if desired.
 
     Stops at the first empty row in Column A (same logic as get_target_allocations).
-    Uses the exact portfolio values returned by fetch_portfolio() (no extra API calls).
+    Uses the portfolio values returned by fetch_portfolio().
     """
     spreadsheet_id = os.getenv("GOOGLE_DOCS_SHEET_ID")
     if not spreadsheet_id:
         raise ValueError("GOOGLE_DOCS_SHEET_ID not set in .env")
 
-    # ({'SOL': 190.8, 'BTC': 1234.56, ...}, total_value)
-    portfolio, total_value, stable_breakdown = fetch_portfolio()
+    (
+        spot_value_by_asset,
+        _,
+        short_used_margin_by_asset,
+        _,
+        total_value,
+        stable_breakdown,
+    ) = fetch_portfolio()
+    current_values = dict(spot_value_by_asset)
+    for asset, used_margin in short_used_margin_by_asset.items():
+        current_values[asset] = current_values.get(asset, 0.0) + used_margin
 
     gc = get_gspread_client()
     worksheet = gc.open_by_key(spreadsheet_id).worksheet("Signals")
@@ -175,7 +193,7 @@ def update_current_allocations_in_sheet():
             break  # stop at first empty asset row (matches get_target_allocations)
 
         asset = str(row[0]).strip().upper()
-        usd_value = portfolio.get(asset, 0.0)  # 0.0 if we hold nothing
+        usd_value = current_values.get(asset, 0.0)  # 0.0 if we hold nothing
         current_usd_values.append(
             [usd_value]
         )  # list-of-lists for gspread column update
@@ -233,22 +251,74 @@ def update_current_allocations_in_sheet():
 
 
 def parse_signal_update(text: str) -> Dict[str, Tuple[float, str]]:
-    """Parse the exact Telegram 'Portfolio Signal Update' format.
-    Returns {ASSET: (target_pct_decimal, direction)} e.g. {'HYPE': (0.344, 'Long')}
-    CASH lines are completely skipped.
+    """Parse RSPS and Short Module targets from a Portfolio Signal Update.
+
+    Returns {ASSET: (target_pct_decimal, direction)}. Net Positions are
+    intentionally ignored because they repeat the allocations in the modules.
     """
-    # Matches lines like: - 34.4% HYPE LONG 🟢   or   - 17.3% CASH 💵
-    pattern = r"-\s+([\d.]+)%\s+([A-Z0-9]+)(?:\s+(LONG|CASH))?"
-    matches = re.findall(pattern, text, re.IGNORECASE)
+    section_pattern = re.compile(
+        r"(?im)^[^\r\n]*\b(RSPS Signal|Short Module|Net Positions):[^\r\n]*$"
+    )
+    sections = list(section_pattern.finditer(text))
+    if sections:
+        signal_sections = []
+        for index, section in enumerate(sections):
+            if section.group(1).lower() not in {"rsps signal", "short module"}:
+                continue
+            section_end = (
+                sections[index + 1].start()
+                if index + 1 < len(sections)
+                else len(text)
+            )
+            signal_sections.append(text[section.end() : section_end])
+        signal_text = "\n".join(signal_sections)
+    else:
+        # Preserve support for older messages that omitted section headings.
+        signal_text = text
+
+    pattern = re.compile(
+        r"-\s*([\d.]+)%\s+([A-Z0-9]+)(?:\s+(LONG|SHORT|CASH))?\b",
+        re.IGNORECASE,
+    )
     targets: Dict[str, Tuple[float, str]] = {}
-    for pct_str, asset, direction in matches:
+    for line in signal_text.splitlines():
+        line = line.replace("*", "")
+        match = pattern.search(line)
+        if not match:
+            continue
+        pct_str, asset, direction = match.groups()
         asset = asset.strip().upper()
         if asset == "CASH":
-            continue  # Skip CASH completely
-        pct = float(pct_str) / 100
-        dir_val = (direction or "Long").capitalize()
-        targets[asset] = (pct, dir_val)
+            continue
+        targets[asset] = (
+            float(pct_str) / 100,
+            (direction or "Long").capitalize(),
+        )
     return targets
+
+
+def _direction_format_request(sheet_id: int, row: int, direction: str) -> dict:
+    source_row = 1 if direction == "Long" else 2
+    return {
+        "copyPaste": {
+            "source": {
+                "sheetId": sheet_id,
+                "startRowIndex": source_row,
+                "endRowIndex": source_row + 1,
+                "startColumnIndex": 10,
+                "endColumnIndex": 11,
+            },
+            "destination": {
+                "sheetId": sheet_id,
+                "startRowIndex": row - 1,
+                "endRowIndex": row,
+                "startColumnIndex": 1,
+                "endColumnIndex": 2,
+            },
+            "pasteType": "PASTE_FORMAT",
+            "pasteOrientation": "NORMAL",
+        }
+    }
 
 
 def update_targets_from_signal(signal_text: str) -> dict:
@@ -256,7 +326,7 @@ def update_targets_from_signal(signal_text: str) -> dict:
     - If NO valid targets → treat as 100% CASH and zero out Column C for ALL existing assets.
     - For NEW assets: full row copy (A:F) + explicitly fix Column D formula to =B2*C{row}
       (copy-paste was auto-incrementing B3 → B2, so we force the correct reference).
-    - Column B stays "Long" (capitalized as requested).
+    - Column B uses the Long/Short direction and matching format from K2/K3.
     - Uses USER_ENTERED everywhere → no backticks.
     """
     targets = parse_signal_update(signal_text)
@@ -294,12 +364,16 @@ def update_targets_from_signal(signal_text: str) -> dict:
     # === NORMAL CASE (assets in signal) ===
     updates = []
     new_rows_data = []
+    direction_format_requests = []
     for asset, (pct, direction) in targets.items():
         pct_str = f"{pct * 100:.1f}%"
         if asset in existing:
             row = existing[asset]
             updates.append(
                 {"range": f"B{row}:C{row}", "values": [[direction, pct_str]]}
+            )
+            direction_format_requests.append(
+                _direction_format_request(worksheet.id, row, direction)
             )
         else:
             new_rows_data.append([asset, direction, pct_str])
@@ -364,10 +438,16 @@ def update_targets_from_signal(signal_text: str) -> dict:
                 [[f"=B2*C{current_new_row}"]],
                 value_input_option="USER_ENTERED",
             )
+            direction_format_requests.append(
+                _direction_format_request(worksheet.id, current_new_row, direction)
+            )
 
         results.append(
             f"✅ Added {len(new_rows_data)} new asset(s) with full row copy + fixed D formula"
         )
+
+    if direction_format_requests:
+        worksheet.spreadsheet.batch_update({"requests": direction_format_requests})
 
     total = sum(pct for pct, _ in targets.values())
     results.append(f"📊 New targets sum: {total:.1%} ({len(targets)} assets)")

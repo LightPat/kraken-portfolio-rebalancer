@@ -23,6 +23,7 @@ TELEGRAM_WEBHOOK_PORT = int(os.getenv("TELEGRAM_WEBHOOK_PORT", "8443"))
 
 # Constants
 HTTP_TIMEOUT_SECONDS = 600.0
+EXECUTE_TIMEOUT_SECONDS = 1200.0
 CONNECT_TIMEOUT_SECONDS = 10.0
 CRYPTO_DECIMALS = 6
 USD_DECIMALS = 2
@@ -31,7 +32,7 @@ PRICE_DECIMALS = 4
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Kraken Rebalancer ready!\n\nCommands:\n/rebalance\n/cancelRebalance\n/updateCurrentAllocations"
+        "🤖 Kraken Rebalancer ready!\n\nCommands:\n/rebalance\n\n/updateCurrentAllocations"
     )
 
 
@@ -161,7 +162,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🔄 Rebalance in progress...")
         try:
             timeout = httpx.Timeout(
-                HTTP_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS
+                EXECUTE_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS
             )
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(
