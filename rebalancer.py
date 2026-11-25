@@ -16,6 +16,7 @@ from kraken import (
     is_stable_coin,
     get_best_trading_symbol,
     validate_quote_balances,
+    _quote_currency,
     fetch_order,
     get_order_remaining,
 )
@@ -90,7 +91,7 @@ def generate_rebalance_plan() -> Dict[str, Any]:
             "capital_usd": capital_usd,
             "price": price,
             "symbol": symbol,
-            "quote": symbol.split("/")[1],
+            "quote": _quote_currency(symbol),
             "margin": margin,
         }
         if action in {"open_long", "increase_long", "open_short", "increase_short"}:

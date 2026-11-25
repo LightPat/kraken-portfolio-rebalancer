@@ -11,6 +11,11 @@ STABLE_COINS: Set[str] = {"USD", "USDC", "USDG"}
 _exchange = None
 
 
+def _quote_currency(symbol: str) -> str:
+    quote = symbol.split("/")[1]
+    return quote.split(":")[0].upper()
+
+
 def _ensure_bitnomial_markets(exchange) -> None:
     """Load Kraken's Bitnomial pairs into CCXT's market indexes."""
     exchange.load_markets()
@@ -529,28 +534,30 @@ def validate_quote_balances(plan: List[Dict]) -> List[str]:
     exchange = get_kraken_exchange()
     balance = exchange.fetch_balance()["free"]
     projected = {s: balance.get(s, 0.0) for s in STABLE_COINS}
+    reserved_short_proceeds = {s: 0.0 for s in STABLE_COINS}
 
     for position in fetch_margin_positions():
-        quote = position["symbol"].split("/")[1].upper()
+        quote = _quote_currency(position["symbol"])
         if position["side"] == "short" and quote in projected:
-            short_proceeds = position["entry_price"] * position["size_base"]
-            projected[quote] = max(0.0, projected[quote] - short_proceeds)
+            reserved_short_proceeds[quote] += (
+                position["entry_price"] * position["size_base"]
+            )
 
-    # Only spot long reductions add quote funds. Margin short sale proceeds are
-    # collateral for that short and are never available to fund another action.
+    # Only spot long reductions add quote funds.
     for trade in plan:
         if trade["action"] in {"reduce_long", "close_long", "sell"} and not trade.get(
             "margin", False
         ):
-            quote = trade["quote"]
+            quote = _quote_currency(trade["symbol"])
             if quote in projected:
                 projected[quote] += trade["amount_usd"]
 
     for trade in plan:
-        quote = trade["quote"]
-        if trade["action"] in {"cover_short", "reduce_short"}:
-            needed = trade["amount_usd"]
-        elif trade["action"] in {"open_short", "increase_short"}:
+        quote = _quote_currency(trade["symbol"])
+        action = trade["action"]
+        if action in {"cover_short", "reduce_short"}:
+            continue
+        elif action in {"open_short", "increase_short"}:
             needed = trade["capital_usd"]
         elif trade["action"] in {"open_long", "increase_long", "buy"}:
             needed = trade["amount_usd"]
@@ -558,6 +565,8 @@ def validate_quote_balances(plan: List[Dict]) -> List[str]:
             continue
 
         available = projected.get(quote, 0.0)
+        if action in {"open_short", "increase_short"}:
+            available = max(0.0, available - reserved_short_proceeds.get(quote, 0.0))
         if available < needed:
             shortfall = needed - available
             warnings.append(

@@ -31,7 +31,7 @@ PRICE_DECIMALS = 4
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Kraken Rebalancer ready!\n\nCommands:\n/rebalance\n/cancelRebalance\n/updateCurrentAllocations"
+        "🤖 Kraken Rebalancer ready!\n\nCommands:\n/rebalance\n\n/updateCurrentAllocations"
     )
 
 

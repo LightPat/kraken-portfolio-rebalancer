@@ -77,6 +77,91 @@ class BitnomialMarketTests(unittest.TestCase):
         ensure_markets.assert_called_once_with(self.exchange)
 
 
+class QuoteCurrencyTests(unittest.TestCase):
+    def test_extracts_base_quote_currency_from_margin_symbol(self):
+        self.assertEqual(kraken._quote_currency("ETH/USD:BTNL"), "USD")
+
+    def test_quote_balance_validation_allows_cover_with_used_margin(self):
+        exchange = Mock()
+        exchange.fetch_balance.return_value = {"free": {"USD": 50.0}}
+        position = {
+            "symbol": "ETH/USD:BTNL",
+            "side": "short",
+            "entry_price": 100.0,
+            "size_base": 2.0,
+            "used_margin_usd": 100.0,
+        }
+        trade = {
+            "symbol": "ETH/USD:BTNL",
+            "quote": "USD:BTNL",
+            "asset": "ETH",
+            "action": "cover_short",
+            "amount_usd": 200.0,
+        }
+
+        with (
+            patch("kraken.get_kraken_exchange", return_value=exchange),
+            patch("kraken.fetch_margin_positions", return_value=[position]),
+        ):
+            warnings = kraken.validate_quote_balances([trade])
+
+        self.assertEqual(warnings, [])
+
+    def test_quote_balance_validation_reserves_short_proceeds_for_new_shorts(self):
+        exchange = Mock()
+        exchange.fetch_balance.return_value = {"free": {"USD": 500.0}}
+        position = {
+            "symbol": "ETH/USD:BTNL",
+            "side": "short",
+            "entry_price": 100.0,
+            "size_base": 2.0,
+            "used_margin_usd": 100.0,
+        }
+        trade = {
+            "symbol": "BTC/USD:BTNL",
+            "quote": "USD",
+            "asset": "BTC",
+            "action": "open_short",
+            "amount_usd": 400.0,
+            "capital_usd": 400.0,
+        }
+
+        with (
+            patch("kraken.get_kraken_exchange", return_value=exchange),
+            patch("kraken.fetch_margin_positions", return_value=[position]),
+        ):
+            warnings = kraken.validate_quote_balances([trade])
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("requires $100.00 more USD", warnings[0])
+
+    def test_quote_balance_validation_credits_spot_reductions_to_stable_balance(self):
+        exchange = Mock()
+        exchange.fetch_balance.return_value = {"free": {"USD": 500.0}}
+        reduction = {
+            "symbol": "ETH/USD:BTNL",
+            "quote": "USD:BTNL",
+            "action": "reduce_long",
+            "amount_usd": 100.0,
+            "margin": False,
+        }
+        cover = {
+            "symbol": "ETH/USD:BTNL",
+            "quote": "USD:BTNL",
+            "asset": "ETH",
+            "action": "cover_short",
+            "amount_usd": 600.0,
+        }
+
+        with (
+            patch("kraken.get_kraken_exchange", return_value=exchange),
+            patch("kraken.fetch_margin_positions", return_value=[]),
+        ):
+            warnings = kraken.validate_quote_balances([reduction, cover])
+
+        self.assertEqual(warnings, [])
+
+
 class MarginSymbolTests(unittest.TestCase):
     def setUp(self):
         self.exchange_patcher = patch("kraken.get_kraken_exchange")
