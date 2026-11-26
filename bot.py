@@ -274,6 +274,16 @@ async def sdca_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"\n📥 Additional BTC to move from cold storage: "
             f"{plan['unavailable_btc']:.8f}"
         )
+    if plan.get("quote_warnings"):
+        description += (
+            "\n\n"
+            + "\n".join(plan["quote_warnings"])
+            + "\n💱 Convert or fund USD on Kraken, then run /sdca again "
+            "to refresh the plan."
+        )
+        await status_message.edit_text(description)
+        return
+
     callback_data = "sdca_confirm"
     keyboard = [[
         InlineKeyboardButton("✅ Execute", callback_data=callback_data),
@@ -314,6 +324,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 resp.raise_for_status()
                 result = resp.json()
+        except httpx.HTTPStatusError as e:
+            response_text = e.response.text.strip()
+            error_detail = response_text or str(e)
+            await query.edit_message_text(
+                f"❌ SDCA execute failed: HTTP {e.response.status_code}: "
+                f"{error_detail}"
+            )
+            return
         except Exception as e:
             await query.edit_message_text(
                 f"❌ SDCA execute failed: {type(e).__name__}: {e}"
@@ -321,6 +339,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         result_text = "\n".join(result.get("results", ["No details returned"]))
+        if result.get("status") == "blocked":
+            await query.edit_message_text(f"⏸️ SDCA trade paused.\n\n{result_text}")
+            return
         await query.edit_message_text(f"🚀 SDCA trade complete!\n\n{result_text}")
         return
 

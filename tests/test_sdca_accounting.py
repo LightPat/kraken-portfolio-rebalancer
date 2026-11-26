@@ -127,12 +127,50 @@ class SdcaCashAccountingTests(unittest.TestCase):
             }),
             patch("rebalancer.get_kraken_exchange") as exchange,
             patch("rebalancer.get_best_trading_symbol", return_value="BTC/USD"),
+            patch("rebalancer.validate_quote_balances", return_value=[]),
         ):
             exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
             plan = rebalancer.generate_sdca_plan()
 
         self.assertEqual(plan["action"], "buy")
         self.assertAlmostEqual(plan["amount_usd"], 50.0)
+        self.assertEqual(plan["quote_warnings"], [])
+
+    def test_buy_plan_reports_quote_shortfall_before_confirmation(self):
+        warning = "⚠️ CONVERSION NEEDED: buy BTC/USD requires $20.00 more USD."
+        with (
+            patch("rebalancer.update_current_allocations_in_sheet"),
+            patch(
+                "rebalancer.get_sdca_sheet_values",
+                return_value={
+                    "cash_usd": 200.0,
+                    "change_pct": 0.1,
+                    "kraken_btc": 0.0,
+                    "cold_btc": 0.0,
+                },
+            ),
+            patch("rebalancer.get_kraken_exchange") as exchange,
+            patch("rebalancer.get_best_trading_symbol", return_value="BTC/USD"),
+            patch(
+                "rebalancer.validate_quote_balances", return_value=[warning]
+            ) as validate_balances,
+        ):
+            exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
+            plan = rebalancer.generate_sdca_plan()
+
+        self.assertEqual(plan["quote_warnings"], [warning])
+        validate_balances.assert_called_once_with(
+            [
+                {
+                    "asset": "BTC",
+                    "action": "buy",
+                    "amount_usd": 20.0,
+                    "symbol": "BTC/USD",
+                    "quote": "USD",
+                    "margin": False,
+                }
+            ]
+        )
 
     def test_sdca_plan_refreshes_allocations_before_reading_plan_inputs(self):
         with (
@@ -148,12 +186,35 @@ class SdcaCashAccountingTests(unittest.TestCase):
                 },
             ),
             patch("rebalancer.get_best_trading_symbol", return_value="BTC/USD"),
+            patch("rebalancer.validate_quote_balances", return_value=[]),
         ):
             exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
             result = rebalancer.generate_sdca_plan()
 
         refresh.assert_called_once_with()
         self.assertAlmostEqual(result["amount_usd"], 10.0)
+
+    def test_execute_pauses_when_plan_reports_quote_shortfall(self):
+        warning = "⚠️ CONVERSION NEEDED: buy BTC/USD requires $20.00 more USD."
+        plan = {
+            "action": "buy",
+            "symbol": "BTC/USD",
+            "amount_usd": 20.0,
+            "amount_base": 0.2,
+            "quote_warnings": [warning],
+            "dry_run": False,
+        }
+        with (
+            patch("rebalancer.generate_sdca_plan", return_value=plan),
+            patch("rebalancer.get_free_balance") as get_free_balance,
+            patch("rebalancer.create_post_only_limit_order") as create_order,
+        ):
+            result = rebalancer.execute_sdca_trade()
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn(warning, result["results"])
+        get_free_balance.assert_not_called()
+        create_order.assert_not_called()
 
     def test_sdca_dry_run_refreshes_allocations_after_plan(self):
         plan = {

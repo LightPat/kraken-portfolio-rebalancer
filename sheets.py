@@ -212,11 +212,17 @@ def get_sdca_sheet_values() -> dict[str, float]:
     worksheet = _get_signals_worksheet()
     cash = _parse_sheet_numeric_value(worksheet.acell("Q3").value, "Q3")
     change_pct_value = worksheet.acell("Q4").value
+    change_pct_text = str(change_pct_value).strip()
+    has_percent_sign = change_pct_text.endswith("%")
     try:
-        change_pct = float(str(change_pct_value).strip())
+        change_pct = float(
+            change_pct_text[:-1].strip() if has_percent_sign else change_pct_text
+        )
+        if has_percent_sign:
+            change_pct /= 100
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            f"Expected a signed decimal change in Q4, got: {change_pct_value!r}"
+            f"Expected a signed decimal change or percentage in Q4, got: {change_pct_value!r}"
         ) from exc
     if not math.isfinite(change_pct):
         raise ValueError(f"Expected a finite signed decimal change in Q4")

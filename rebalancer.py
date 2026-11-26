@@ -330,6 +330,7 @@ def generate_sdca_plan() -> Dict:
     update_current_allocations_in_sheet()
     sdca = get_sdca_sheet_values()
     change_pct = sdca["change_pct"]
+    dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
     action = "buy" if change_pct > 0 else "sell" if change_pct < 0 else None
     if action is None:
         return {
@@ -343,7 +344,8 @@ def generate_sdca_plan() -> Dict:
             "cash_usd": sdca["cash_usd"],
             "kraken_btc": sdca["kraken_btc"],
             "cold_btc": sdca["cold_btc"],
-            "dry_run": os.getenv("DRY_RUN", "false").lower() == "true",
+            "quote_warnings": [],
+            "dry_run": dry_run,
         }
 
     exchange = get_kraken_exchange()
@@ -360,17 +362,33 @@ def generate_sdca_plan() -> Dict:
         amount_base = amount_usd / price
         target_btc = 0.0
         unavailable_btc = 0.0
+        quote_warnings = []
+        if not dry_run:
+            quote_warnings = validate_quote_balances(
+                [
+                    {
+                        "asset": "BTC",
+                        "action": "buy",
+                        "amount_usd": amount_usd,
+                        "symbol": symbol,
+                        "quote": _quote_currency(symbol),
+                        "margin": False,
+                    }
+                ]
+            )
     elif action == "sell":
         target_btc = abs(change_pct) * (sdca["kraken_btc"] + sdca["cold_btc"])
         free_btc = get_free_balance("BTC")
         amount_base = min(target_btc, free_btc, sdca["kraken_btc"])
         unavailable_btc = max(0.0, target_btc - amount_base)
         amount_usd = amount_base * price
+        quote_warnings = []
     else:
         target_btc = 0.0
         unavailable_btc = 0.0
         amount_base = 0.0
         amount_usd = 0.0
+        quote_warnings = []
 
     return {
         "action": action,
@@ -384,7 +402,8 @@ def generate_sdca_plan() -> Dict:
         "cash_usd": sdca["cash_usd"],
         "kraken_btc": sdca["kraken_btc"],
         "cold_btc": sdca["cold_btc"],
-        "dry_run": os.getenv("DRY_RUN", "false").lower() == "true",
+        "quote_warnings": quote_warnings,
+        "dry_run": dry_run,
     }
 
 
@@ -442,6 +461,18 @@ def execute_sdca_trade() -> Dict[str, Any]:
     if action is None or plan["amount_base"] <= 0:
         results.append("ℹ️ SDCA Change % Today is zero; nothing to do.")
         return {"results": results, "plan": plan, "dry_run": plan["dry_run"]}
+    if plan.get("quote_warnings"):
+        results.extend(plan["quote_warnings"])
+        results.append(
+            "⏸️ SDCA buy paused until the required USD funds are available. "
+            "Convert or fund USD, then generate a fresh plan."
+        )
+        return {
+            "status": "blocked",
+            "results": results,
+            "plan": plan,
+            "dry_run": plan["dry_run"],
+        }
     if plan["dry_run"]:
         results.append(
             f"🧪 DRY-RUN: Would {action} {plan['amount_base']:.8f} BTC "
