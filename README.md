@@ -21,11 +21,11 @@ sizing matches Signals!B2 exactly: E2 − I3 − Q6, with no N2 multiplier. Q6 i
 SDCA's manually tracked Kraken cash. Q3 (SDCA USD Left) is a manual planning
 balance, not a Kraken balance; the bot does not change Q3 or Q6. SDCA buy
 sizing uses Q3 and BTC tracked in Q7 (Kraken) and Q8 (cold storage).
-Set `TREZOR_BTC_PUB_KEY` in `.env` to the Trezor account-level Bitcoin xpub,
-ypub, or zpub. The bot derives receive addresses using the prefix-appropriate
-BIP44/49/84 format and sums confirmed plus unconfirmed balances from
-mempool.space, stopping after 20 consecutive unused addresses. An unset or
-empty key is treated as a zero cold-wallet balance.
+Set `TREZOR_BTC_ADDRESS` in `.env` to a single Bitcoin address (`bc1`, `3`, or
+`1` prefix). The bot reads its confirmed plus unconfirmed balance from
+mempool.space. Always withdraw BTC to this same address so the tracked cold
+balance remains accurate. An unset or empty address is treated as a zero
+cold-wallet balance.
 For live execution progress, make the bot token available to the API service as
 `TELEGRAM_KRAKEN_PORTFOLIO_REBALANCER_BOT_HTTP_TOKEN`.
 
