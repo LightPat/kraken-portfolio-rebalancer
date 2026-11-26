@@ -10,25 +10,19 @@ with patch.dict(
 
 
 class CapitalSplitTests(unittest.TestCase):
-    def test_rsps_investable_value_uses_only_its_split_less_reserve(self):
+    def test_rsps_investable_value_matches_sheet_formula_without_split(self):
         self.assertEqual(
-            rebalancer.calculate_rsps_investable_value(10_000, 0.7, 500),
-            6_500,
+            rebalancer.calculate_rsps_investable_value(10_000, 500, 300),
+            9_200,
         )
 
     def test_rsps_investable_value_never_goes_below_zero(self):
         self.assertEqual(
-            rebalancer.calculate_rsps_investable_value(1_000, 0.2, 500),
+            rebalancer.calculate_rsps_investable_value(1_000, 800, 300),
             0,
         )
 
-    def test_rsps_investable_value_subtracts_sdca_cash_on_kraken_not_q3(self):
-        self.assertEqual(
-            rebalancer.calculate_rsps_investable_value(10_000, 0.7, 500, 300),
-            6_200,
-        )
-
-    def test_rebalance_plan_applies_sheet_split_and_rsps_reserve(self):
+    def test_rebalance_plan_matches_formula_and_keeps_split_for_display(self):
         portfolio = (
             {},
             {},
@@ -60,7 +54,8 @@ class CapitalSplitTests(unittest.TestCase):
         ):
             plan = rebalancer.generate_rebalance_plan()
 
-        self.assertEqual(plan["investable_value"], 550.0)
+        self.assertEqual(plan["investable_value"], 850.0)
+        self.assertEqual(plan["rsps_allocation_pct"], 0.7)
         self.assertEqual(plan["current_stables_total"], 350.0)
         update_allocations.assert_called_once_with()
 

@@ -95,7 +95,6 @@ def generate_rebalance_plan() -> Dict[str, Any]:
 
     investable_value = calculate_rsps_investable_value(
         total_value,
-        rsps_allocation_pct,
         desired_reserve,
         sdca_cash_on_kraken,
     )
@@ -305,34 +304,24 @@ def generate_rebalance_plan() -> Dict[str, Any]:
 
 def calculate_rsps_investable_value(
     total_equity: float,
-    rsps_allocation_pct: float,
     desired_reserve: float,
-    sdca_cash_on_kraken: float = 0.0,
+    sdca_cash_on_kraken: float,
 ) -> float:
-    """Calculate RSPS-only capital, less its reserve and SDCA Kraken cash."""
+    """Calculate RSPS investable capital as Signals!B2: E2 - I3 - Q6."""
     if not all(
         math.isfinite(value)
         for value in (
             total_equity,
-            rsps_allocation_pct,
             desired_reserve,
             sdca_cash_on_kraken,
         )
     ):
         raise ValueError("RSPS capital inputs must be finite numbers")
-    if (
-        not 0 <= rsps_allocation_pct <= 1
-        or desired_reserve < 0
-        or sdca_cash_on_kraken < 0
-    ):
-        raise ValueError(
-            "RSPS allocation must be 0-1 and reserve/cash amounts non-negative"
-        )
+    if desired_reserve < 0 or sdca_cash_on_kraken < 0:
+        raise ValueError("RSPS reserve and SDCA Kraken cash must be non-negative")
     return max(
         0.0,
-        total_equity * rsps_allocation_pct
-        - desired_reserve
-        - sdca_cash_on_kraken,
+        total_equity - desired_reserve - sdca_cash_on_kraken,
     )
 
 
