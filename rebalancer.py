@@ -10,6 +10,7 @@ from sheets import (
     get_sdca_sheet_values,
     update_current_allocations_in_sheet,
     update_sdca_cash_in_sheet,
+    update_sdca_change_in_sheet,
 )
 from kraken import (
     fetch_portfolio,
@@ -539,11 +540,13 @@ def execute_sdca_trade() -> Dict[str, Any]:
     update_current_allocations_in_sheet(
         sdca_btc_adjustment=btc_delta, force_cold_balance_refresh=True
     )
+    update_sdca_change_in_sheet(0.0)
 
     results.append(
         f"✅ SDCA {action.upper()} filled: {abs(btc_delta):.8f} BTC, "
         f"${actual_quote_amount:.2f} {'spent' if action == 'buy' else 'proceeds'}."
     )
+    results.append("✅ Change % Today cleared.")
     if action == "buy":
         results.append(
             f"📤 Withdraw approximately {abs(btc_delta):.8f} BTC "

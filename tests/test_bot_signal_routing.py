@@ -10,6 +10,24 @@ with patch.dict(
 
 
 class SignalRoutingTests(unittest.IsolatedAsyncioTestCase):
+    def test_sdca_override_accepts_percent_and_decimal_forms(self):
+        for raw, expected in (
+            ("8.05", 0.0805),
+            ("8.05%", 0.0805),
+            ("0.0805", 0.0805),
+            ("-25", -0.25),
+            ("-0.25", -0.25),
+            ("0", 0.0),
+        ):
+            with self.subTest(raw=raw):
+                self.assertAlmostEqual(bot.parse_sdca_override(raw), expected)
+
+    def test_sdca_override_rejects_out_of_range_values(self):
+        for raw in ("101", "-101%", "nan", "invalid"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValueError):
+                    bot.parse_sdca_override(raw)
+
     def test_detects_sdca_title_despite_markdown_and_emoji(self):
         text = "⚡ **sdca signal update** ⚡"
         self.assertEqual(bot.detect_signal_type(text), "sdca")
