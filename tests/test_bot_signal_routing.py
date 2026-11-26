@@ -101,6 +101,80 @@ class SignalRoutingTests(unittest.IsolatedAsyncioTestCase):
         status_message.edit_text.assert_awaited_once()
         self.assertIn("25.00% (sell)", status_message.edit_text.await_args.args[0])
 
+    async def test_sdca_plan_prompts_for_conversion_without_execute_button(self):
+        warning = "⚠️ CONVERSION NEEDED: buy BTC/USD requires $20.00 more USD."
+        status_message = Mock()
+        status_message.edit_text = AsyncMock()
+        message = Mock()
+        message.reply_text = AsyncMock(return_value=status_message)
+        update = Mock()
+        update.effective_user.id = 1
+        update.message = message
+        context = Mock()
+        context.args = []
+
+        plan = {
+            "action": "buy",
+            "amount_base": 0.0002,
+            "amount_usd": 20.0,
+            "cash_usd": 200.0,
+            "kraken_btc": 0.0,
+            "cold_btc": 0.0,
+            "dry_run": False,
+            "quote_warnings": [warning],
+        }
+        response = Mock()
+        response.raise_for_status = Mock()
+        response.json.return_value = plan
+        client = Mock()
+        client.get = AsyncMock(return_value=response)
+        async_client = Mock()
+        async_client.__aenter__ = AsyncMock(return_value=client)
+        async_client.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("bot.ALLOWED_USER_ID", 1),
+            patch("bot.httpx.AsyncClient", return_value=async_client),
+        ):
+            await bot.sdca_command(update, context)
+
+        text = status_message.edit_text.await_args.args[0]
+        self.assertIn(warning, text)
+        self.assertIn("run /sdca again", text)
+        self.assertNotIn("reply_markup", status_message.edit_text.await_args.kwargs)
+
+    async def test_sdca_execute_failure_includes_api_response_detail(self):
+        query = Mock()
+        query.from_user.id = 1
+        query.data = "sdca_confirm"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        update = Mock()
+        update.callback_query = query
+
+        response = bot.httpx.Response(
+            400,
+            json={"detail": "SDCA order amount is below Kraken's BTC precision"},
+            request=bot.httpx.Request("POST", "http://localhost/sdca/execute"),
+        )
+        client = Mock()
+        client.post = AsyncMock(return_value=response)
+        async_client = Mock()
+        async_client.__aenter__ = AsyncMock(return_value=client)
+        async_client.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("bot.ALLOWED_USER_ID", 1),
+            patch("bot.httpx.AsyncClient", return_value=async_client),
+        ):
+            await bot.button_callback(update, Mock())
+
+        query.edit_message_text.assert_awaited()
+        self.assertIn(
+            "SDCA order amount is below Kraken's BTC precision",
+            query.edit_message_text.await_args_list[-1].args[0],
+        )
+
     async def test_mixed_titles_reply_without_calling_api(self):
         message = Mock()
         message.text = "SDCA Signal Update; Portfolio Signal Update; BUY 10%"
