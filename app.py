@@ -12,6 +12,8 @@ from rebalancer import (
     reset_cancel_rebalance,
     generate_sdca_plan,
     execute_sdca_trade,
+    TelegramProgressReporter,
+    report_progress,
 )
 from sheets import (
     update_current_allocations_in_sheet,
@@ -62,6 +64,11 @@ class SDCAChangeRequest(BaseModel):
     change_pct: float
 
 
+class ExecuteProgressRequest(BaseModel):
+    chat_id: int | None = None
+    message_id: int | None = None
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -89,41 +96,49 @@ async def get_plan():
 
 
 @app.post("/rebalance/execute", dependencies=[Depends(get_api_key)])
-async def execute_rebalance():
+async def execute_rebalance(data: ExecuteProgressRequest = ExecuteProgressRequest()):
     """Generate a fresh rebalance plan and execute the trades. Always uses the latest data from Google Sheets + Kraken."""
+    progress = TelegramProgressReporter(data.chat_id, data.message_id)
     try:
         with rebalance_lock.acquire(timeout=REBALANCE_LOCK_TIMEOUT_SECONDS):
             reset_cancel_rebalance()
             try:
-                # 1. Get the latest plan (same as /rebalance/plan)
-                plan_data = generate_rebalance_plan()
+                plan_data = generate_rebalance_plan(progress=progress)
                 trade_plan = plan_data.get("plan", [])
 
-                # 2. Early return if nothing to do
                 if not trade_plan:
-                    return {
+                    result = {
                         "status": "already_balanced",
                         "message": "Portfolio is already balanced according to targets.",
                         "dry_run": plan_data["dry_run"],
                         "total_value_usd": plan_data["total_value_usd"],
                         "plan_data": plan_data,
                     }
-
-                results = execute_trades(trade_plan)
-                return {
-                    "status": "executed",
-                    "message": "Rebalance trades executed successfully.",
-                    "results": results,
-                    "total_value_usd": plan_data["total_value_usd"],
-                    "desired_reserve": plan_data["desired_reserve"],
-                    "investable_value": plan_data["investable_value"],
-                    "current_stables_total": plan_data["current_stables_total"],
-                    "dry_run": plan_data["dry_run"],
-                    "executed_plan": trade_plan,
-                    "plan_data": plan_data,
-                }
+                else:
+                    results = execute_trades(trade_plan, progress=progress)
+                    result = {
+                        "status": "executed",
+                        "message": "Rebalance trades executed successfully.",
+                        "results": results,
+                        "total_value_usd": plan_data["total_value_usd"],
+                        "desired_reserve": plan_data["desired_reserve"],
+                        "investable_value": plan_data["investable_value"],
+                        "current_stables_total": plan_data["current_stables_total"],
+                        "dry_run": plan_data["dry_run"],
+                        "executed_plan": trade_plan,
+                        "plan_data": plan_data,
+                    }
             finally:
+                report_progress(progress, "Updating sheet…")
                 update_current_allocations_in_sheet()
+                report_progress(progress, "Sheet updated.")
+
+        result_text = "\n".join(result.get("results", ["No details returned"]))
+        final_text = f"🚀 Rebalance executed!\n\n{result_text}"
+        result["progress_reported"] = report_progress(
+            progress, final_text, final=True
+        )
+        return result
     except Timeout:
         age = None
         try:
@@ -135,7 +150,25 @@ async def execute_rebalance():
         message = "A rebalance is already running. Please try again later."
         if age is not None:
             message += f" (lock file age: {age}s)"
-        raise HTTPException(status_code=409, detail=message)
+        reported = report_progress(
+            progress, f"❌ {message}", final=True
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=message,
+            headers={"X-Telegram-Progress-Reported": str(reported).lower()},
+        )
+    except Exception as exc:
+        reported = report_progress(
+            progress,
+            f"❌ Execute failed: {type(exc).__name__}: {exc}",
+            final=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"{type(exc).__name__}: {exc}",
+            headers={"X-Telegram-Progress-Reported": str(reported).lower()},
+        ) from exc
 
 
 @app.get("/sdca/plan", dependencies=[Depends(get_api_key)])
@@ -147,18 +180,47 @@ async def get_sdca_plan():
 
 
 @app.post("/sdca/execute", dependencies=[Depends(get_api_key)])
-async def execute_sdca():
+async def execute_sdca(data: ExecuteProgressRequest = ExecuteProgressRequest()):
+    progress = TelegramProgressReporter(data.chat_id, data.message_id)
     try:
         with rebalance_lock.acquire(timeout=REBALANCE_LOCK_TIMEOUT_SECONDS):
             reset_cancel_rebalance()
-            return execute_sdca_trade()
+            result = execute_sdca_trade(progress=progress)
+        result_text = "\n".join(result.get("results", ["No details returned"]))
+        if result.get("status") == "blocked":
+            final_text = f"⏸️ SDCA trade paused.\n\n{result_text}"
+        else:
+            final_text = f"🚀 SDCA trade complete!\n\n{result_text}"
+        result["progress_reported"] = report_progress(
+            progress, final_text, final=True
+        )
+        return result
     except Timeout as exc:
+        message = "A rebalance or SDCA trade is already running. Please try again later."
+        reported = report_progress(progress, f"❌ {message}", final=True)
         raise HTTPException(
             status_code=409,
-            detail="A rebalance or SDCA trade is already running. Please try again later.",
+            detail=message,
+            headers={"X-Telegram-Progress-Reported": str(reported).lower()},
         ) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        reported = report_progress(
+            progress, f"❌ SDCA execute failed: {type(exc).__name__}: {exc}", final=True
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+            headers={"X-Telegram-Progress-Reported": str(reported).lower()},
+        ) from exc
+    except Exception as exc:
+        reported = report_progress(
+            progress, f"❌ SDCA execute failed: {type(exc).__name__}: {exc}", final=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"{type(exc).__name__}: {exc}",
+            headers={"X-Telegram-Progress-Reported": str(reported).lower()},
+        ) from exc
 
 
 class SignalUpdateRequest(BaseModel):

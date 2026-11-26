@@ -1,6 +1,8 @@
 import os
 import time
 import math
+import logging
+import httpx
 from pathlib import Path
 from typing import List, Dict, Any
 from sheets import (
@@ -10,6 +12,7 @@ from sheets import (
     get_sdca_cash_on_kraken,
     get_sdca_sheet_values,
     update_current_allocations_in_sheet,
+    update_sdca_cash_after_fill,
     update_sdca_change_in_sheet,
 )
 from kraken import (
@@ -44,6 +47,83 @@ SHORT_ACTIONS = {
 }
 
 CANCEL_FLAG_FILE = "cancel_rebalance.flag"
+PROGRESS_EDIT_INTERVAL_SECONDS = 2.0
+PROGRESS_HTTP_TIMEOUT_SECONDS = 5.0
+TELEGRAM_TOKEN_ENV = "TELEGRAM_KRAKEN_PORTFOLIO_REBALANCER_BOT_HTTP_TOKEN"
+logger = logging.getLogger(__name__)
+
+
+class TelegramProgressReporter:
+    def __init__(self, chat_id: int | None, message_id: int | None):
+        self.chat_id = chat_id
+        self.message_id = message_id
+        self.token = os.getenv(TELEGRAM_TOKEN_ENV)
+        self.last_edit_at: float | None = (
+            time.monotonic()
+            if self.token and chat_id is not None and message_id is not None
+            else None
+        )
+        self.current_trade: str | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.token and self.chat_id is not None and self.message_id)
+
+    def update(self, text: str, final: bool = False) -> bool:
+        if not self.enabled:
+            return False
+
+        elapsed = (
+            PROGRESS_EDIT_INTERVAL_SECONDS
+            if self.last_edit_at is None
+            else time.monotonic() - self.last_edit_at
+        )
+        if final and elapsed < PROGRESS_EDIT_INTERVAL_SECONDS:
+            time.sleep(PROGRESS_EDIT_INTERVAL_SECONDS - elapsed)
+        elif not final and elapsed < PROGRESS_EDIT_INTERVAL_SECONDS:
+            return False
+
+        self.last_edit_at = time.monotonic()
+        response = httpx.post(
+            f"https://api.telegram.org/bot{self.token}/editMessageText",
+            json={
+                "chat_id": self.chat_id,
+                "message_id": self.message_id,
+                "text": text,
+            },
+            timeout=PROGRESS_HTTP_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        if not response.json().get("ok", False):
+            raise RuntimeError("Telegram rejected the progress message edit")
+        return True
+
+
+def report_progress(
+    progress: TelegramProgressReporter | None, text: str, final: bool = False
+) -> bool:
+    """Edit a Telegram progress message without affecting trade execution."""
+    if progress is None:
+        return False
+    try:
+        return progress.update(text, final=final)
+    except Exception:
+        logger.warning("Failed to edit Telegram progress message", exc_info=True)
+        return False
+
+
+def _trade_progress_label(trade: Dict, index: int, total: int) -> str:
+    action = trade["action"]
+    asset = trade.get("asset") or trade.get("symbol", "asset").split("/")[0]
+    if action in {"reduce_short", "cover_short"}:
+        description = f"Closing {asset} short"
+    elif action in {"reduce_long", "close_long"}:
+        description = f"Closing {asset} long"
+    elif action in {"open_short", "increase_short"}:
+        description = f"Opening {asset} short"
+    else:
+        description = f"Opening {asset} long"
+    return f"{description} ({index}/{total})"
 
 
 def request_cancel_rebalance():
@@ -61,8 +141,12 @@ def is_rebalance_cancel_requested() -> bool:
     return os.path.exists(CANCEL_FLAG_FILE)
 
 
-def generate_rebalance_plan() -> Dict[str, Any]:
+def generate_rebalance_plan(
+    progress: TelegramProgressReporter | None = None,
+) -> Dict[str, Any]:
+    report_progress(progress, "Refreshing allocations…")
     update_current_allocations_in_sheet()
+    report_progress(progress, "Allocations refreshed; building RSPS plan…")
     exchange = get_kraken_exchange()
     (
         spot_value_by_asset,
@@ -78,12 +162,6 @@ def generate_rebalance_plan() -> Dict[str, Any]:
     rsps_allocation_pct = get_rsps_allocation_pct()
     sdca_values = get_sdca_sheet_values()
     sdca_cash_on_kraken = get_sdca_cash_on_kraken()
-    stable_breakdown = dict(stable_breakdown)
-    stable_breakdown["USD"] = max(
-        0.0,
-        stable_breakdown.get("USD", 0.0) - sdca_cash_on_kraken,
-    )
-
     if sdca_values["kraken_btc"] > 0:
         btc_price = get_btc_usd_price()
         spot_value_by_asset = dict(spot_value_by_asset)
@@ -325,8 +403,12 @@ def calculate_rsps_investable_value(
     )
 
 
-def generate_sdca_plan() -> Dict:
+def generate_sdca_plan(
+    progress: TelegramProgressReporter | None = None,
+) -> Dict:
+    report_progress(progress, "Refreshing allocations for the SDCA plan…")
     update_current_allocations_in_sheet()
+    report_progress(progress, "Allocations refreshed; building SDCA plan…")
     sdca = get_sdca_sheet_values()
     change_pct = sdca["change_pct"]
     dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
@@ -344,6 +426,7 @@ def generate_sdca_plan() -> Dict:
             "kraken_btc": sdca["kraken_btc"],
             "cold_btc": sdca["cold_btc"],
             "quote_warnings": [],
+            "quote_insufficient": False,
             "dry_run": dry_run,
         }
 
@@ -362,8 +445,9 @@ def generate_sdca_plan() -> Dict:
         target_btc = 0.0
         unavailable_btc = 0.0
         quote_warnings = []
+        quote_insufficient = False
         if not dry_run:
-            quote_warnings = validate_quote_balances(
+            quote_check = validate_quote_balances(
                 [
                     {
                         "asset": "BTC",
@@ -375,6 +459,8 @@ def generate_sdca_plan() -> Dict:
                     }
                 ]
             )
+            quote_warnings = quote_check.warnings
+            quote_insufficient = quote_check.insufficient
     elif action == "sell":
         target_btc = abs(change_pct) * (sdca["kraken_btc"] + sdca["cold_btc"])
         free_btc = get_free_balance("BTC")
@@ -382,12 +468,14 @@ def generate_sdca_plan() -> Dict:
         unavailable_btc = max(0.0, target_btc - amount_base)
         amount_usd = amount_base * price
         quote_warnings = []
+        quote_insufficient = False
     else:
         target_btc = 0.0
         unavailable_btc = 0.0
         amount_base = 0.0
         amount_usd = 0.0
         quote_warnings = []
+        quote_insufficient = False
 
     return {
         "action": action,
@@ -402,6 +490,7 @@ def generate_sdca_plan() -> Dict:
         "kraken_btc": sdca["kraken_btc"],
         "cold_btc": sdca["cold_btc"],
         "quote_warnings": quote_warnings,
+        "quote_insufficient": quote_insufficient,
         "dry_run": dry_run,
     }
 
@@ -453,8 +542,10 @@ def _collect_sdca_order_fills(
     return quote_amount, btc_delta
 
 
-def execute_sdca_trade() -> Dict[str, Any]:
-    plan = generate_sdca_plan()
+def execute_sdca_trade(
+    progress: TelegramProgressReporter | None = None,
+) -> Dict[str, Any]:
+    plan = generate_sdca_plan(progress=progress)
     action = plan["action"]
     results: List[str] = []
     if action is None or plan["amount_base"] <= 0:
@@ -462,9 +553,9 @@ def execute_sdca_trade() -> Dict[str, Any]:
         return {"results": results, "plan": plan, "dry_run": plan["dry_run"]}
     if plan.get("quote_warnings"):
         results.extend(plan["quote_warnings"])
+    if plan.get("quote_insufficient", False):
         results.append(
-            "⏸️ SDCA buy paused until the required USD funds are available. "
-            "Convert or fund USD, then generate a fresh plan."
+            "⏸️ SDCA buy paused until the required stablecoin funds are available."
         )
         return {
             "status": "blocked",
@@ -482,6 +573,7 @@ def execute_sdca_trade() -> Dict[str, Any]:
                 f"📥 Move {plan['unavailable_btc']:.8f} BTC from cold storage "
                 "to Kraken to complete the intended sale."
             )
+        report_progress(progress, "Updating sheet after SDCA dry-run…")
         update_current_allocations_in_sheet()
         return {"results": results, "plan": plan, "dry_run": True}
 
@@ -505,6 +597,7 @@ def execute_sdca_trade() -> Dict[str, Any]:
                 f"📥 Move {plan['target_btc']:.8f} BTC from cold storage "
                 "to Kraken before selling."
             )
+            report_progress(progress, "Updating sheet…")
             update_current_allocations_in_sheet()
             return {"results": results, "plan": plan, "dry_run": False}
 
@@ -523,8 +616,16 @@ def execute_sdca_trade() -> Dict[str, Any]:
     if amount_base <= 0:
         raise ValueError("SDCA order amount is below Kraken's BTC precision")
 
+    trade_label = f"SDCA {action.upper()} BTC (1/1)"
+    if progress is not None:
+        progress.current_trade = trade_label
+    report_progress(progress, f"{trade_label} — placing post-only order…")
     initial_order = create_post_only_limit_order(
         plan["symbol"], side, amount_base, limit_price
+    )
+    report_progress(
+        progress,
+        f"{trade_label} — post-only order placed; waiting for fill…",
     )
     orders = [initial_order]
     initial_status = str(initial_order.get("status", "")).lower()
@@ -546,15 +647,21 @@ def execute_sdca_trade() -> Dict[str, Any]:
             "action": action,
             "margin": False,
             "reduce_only": False,
+            "progress_label": trade_label,
         }
         fallback_orders = _wait_for_order_completion(
             [order_reference],
             results,
             timeout_seconds=ORDER_TIMEOUT_SECONDS,
             poll_interval_seconds=ORDER_POLL_INTERVAL_SECONDS,
+            progress=progress,
         )
         if fallback_orders:
-            orders.extend(_cancel_and_market_fallback(fallback_orders, results))
+            orders.extend(
+                _cancel_and_market_fallback(
+                    fallback_orders, results, progress=progress
+                )
+            )
 
     actual_quote_amount, btc_delta = _collect_sdca_order_fills(
         orders, plan["symbol"], action
@@ -562,14 +669,22 @@ def execute_sdca_trade() -> Dict[str, Any]:
     if actual_quote_amount <= 0 or btc_delta == 0:
         raise RuntimeError("Kraken reported no completed SDCA BTC trade")
 
+    report_progress(progress, f"{trade_label} — filled.")
+    report_progress(progress, "Updating sheet…")
+    updated_cash = update_sdca_cash_after_fill(action, actual_quote_amount)
     update_current_allocations_in_sheet(
         sdca_btc_adjustment=btc_delta, force_cold_balance_refresh=True
     )
     update_sdca_change_in_sheet(0.0)
+    report_progress(progress, "Sheet updated; Change % Today cleared.")
 
     results.append(
         f"✅ SDCA {action.upper()} filled: {abs(btc_delta):.8f} BTC, "
         f"${actual_quote_amount:.2f} {'spent' if action == 'buy' else 'proceeds'}."
+    )
+    results.append(
+        f"💵 SDCA USD Left: ${updated_cash['usd_left']:.2f}; "
+        f"SDCA Cash on Kraken: ${updated_cash['cash_on_kraken']:.2f}."
     )
     results.append("✅ Change % Today cleared.")
     if action == "buy":
@@ -593,11 +708,26 @@ def execute_sdca_trade() -> Dict[str, Any]:
 
 
 def _submit_trade_orders(
-    exchange, trades: List[Dict], dry_run: bool, results: List[str]
+    exchange,
+    trades: List[Dict],
+    dry_run: bool,
+    results: List[str],
+    progress: TelegramProgressReporter | None = None,
+    progress_labels: List[str] | None = None,
 ) -> List[Dict]:
     submitted_orders = []
-    for trade in trades:
+    for index, trade in enumerate(trades, start=1):
+        progress_label = (
+            progress_labels[index - 1]
+            if progress_labels is not None
+            else _trade_progress_label(trade, index, len(trades))
+        )
+        if progress is not None:
+            progress.current_trade = progress_label
         try:
+            report_progress(
+                progress, f"{progress_label} — preparing post-only order…"
+            )
             ticker = exchange.fetch_ticker(trade["symbol"])
             side = {
                 "open_short": "sell",
@@ -635,6 +765,9 @@ def _submit_trade_orders(
                 )
                 continue
 
+            report_progress(
+                progress, f"{progress_label} — placing post-only order…"
+            )
             order = create_post_only_limit_order(
                 trade["symbol"],
                 side,
@@ -650,6 +783,10 @@ def _submit_trade_orders(
                 f"@ LIMIT ~${round(limit_price, PRICE_DECIMALS)} "
                 f"(ID: {order.get('id')})"
             )
+            report_progress(
+                progress,
+                f"{progress_label} — post-only order placed; waiting for fill…",
+            )
 
             submitted_orders.append(
                 {
@@ -662,10 +799,12 @@ def _submit_trade_orders(
                     "action": trade["action"],
                     "margin": margin,
                     "reduce_only": reduce_only,
+                    "progress_label": progress_label,
                 }
             )
         except Exception as e:
             results.append(f"❌ Failed {trade['action']} {trade['asset']}: {e}")
+            report_progress(progress, f"❌ {progress_label} — order failed.")
     return submitted_orders
 
 
@@ -674,6 +813,7 @@ def _wait_for_order_completion(
     results: List[str],
     timeout_seconds: int,
     poll_interval_seconds: int,
+    progress: TelegramProgressReporter | None = None,
 ) -> List[Dict]:
     if not submitted_orders:
         return []
@@ -687,6 +827,21 @@ def _wait_for_order_completion(
         if is_rebalance_cancel_requested():
             results.append(
                 "⏹️ Rebalance cancellation requested, stopping order monitoring."
+            )
+            active_trade = (
+                remaining_orders[0].get("progress_label")
+                if remaining_orders
+                else getattr(progress, "current_trade", None)
+            )
+            if active_trade:
+                results.append(
+                    f"⏹️ Cancellation received during {active_trade}."
+                )
+            report_progress(
+                progress,
+                f"⏹️ Rebalance cancelled during {active_trade}."
+                if active_trade
+                else "⏹️ Rebalance cancelled.",
             )
             return fallback_orders + remaining_orders
 
@@ -706,6 +861,11 @@ def _wait_for_order_completion(
                 or get_order_remaining(order_info) > 0
             ):
                 fallback_orders.append(order)
+            else:
+                report_progress(
+                    progress,
+                    f"{order.get('progress_label', order['asset'])} — filled.",
+                )
 
         remaining_orders = still_open_orders
 
@@ -717,11 +877,18 @@ def _wait_for_order_completion(
     return fallback_orders + remaining_orders
 
 
-def _cancel_and_market_fallback(orders: List[Dict], results: List[str]) -> List[Dict]:
+def _cancel_and_market_fallback(
+    orders: List[Dict],
+    results: List[str],
+    progress: TelegramProgressReporter | None = None,
+) -> List[Dict]:
     market_orders = []
     for order in orders:
         if not order.get("order_id"):
             continue
+        progress_label = order.get("progress_label", order["asset"])
+        if progress is not None:
+            progress.current_trade = progress_label
 
         order_info = fetch_order(order["order_id"], order["symbol"])
         remaining = (
@@ -730,6 +897,9 @@ def _cancel_and_market_fallback(orders: List[Dict], results: List[str]) -> List[
         if remaining <= 0:
             continue
 
+        report_progress(
+            progress, f"{progress_label} — falling back to market…"
+        )
         try:
             cancel_order(order["order_id"])
             results.append(
@@ -752,21 +922,38 @@ def _cancel_and_market_fallback(orders: List[Dict], results: List[str]) -> List[
                 f"{order['asset']} remaining {round(remaining, CRYPTO_DECIMALS)} "
                 f"@ {order['symbol']} (ID: {market.get('id')})"
             )
+            report_progress(
+                progress, f"{progress_label} — market fallback order placed."
+            )
+            market_filled = float(market.get("filled") or 0.0)
+            market_amount = float(market.get("amount") or remaining)
+            if (
+                str(market.get("status", "")).lower() == "closed"
+                and market_filled >= market_amount
+            ):
+                report_progress(progress, f"{progress_label} — filled.")
         except Exception as e:
             results.append(
                 f"❌ Failed market fallback for {order['asset']} ({order['symbol']}): {e}"
             )
+            report_progress(
+                progress, f"❌ {progress_label} — market fallback failed."
+            )
     return market_orders
 
 
-def execute_trades(plan: List[Dict]):
+def execute_trades(
+    plan: List[Dict],
+    progress: TelegramProgressReporter | None = None,
+):
     dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
     exchange = get_kraken_exchange()
     results = []
 
     if not plan:
         return results
-    reserved_sdca_cash = {"USD": get_sdca_cash_on_kraken()}
+    progress_position = 0
+    progress_total = max(1, len(plan))
 
     if not dry_run:
         try:
@@ -787,7 +974,21 @@ def execute_trades(plan: List[Dict]):
             results.append(f"⚠️ Order cleanup failed: {e}")
 
     def execute_phase(trades: List[Dict]) -> bool:
-        submitted_orders = _submit_trade_orders(exchange, trades, dry_run, results)
+        nonlocal progress_position, progress_total
+        progress_total = max(progress_total, progress_position + len(trades))
+        progress_labels = [
+            _trade_progress_label(trade, progress_position + index, progress_total)
+            for index, trade in enumerate(trades, start=1)
+        ]
+        progress_position += len(trades)
+        submitted_orders = _submit_trade_orders(
+            exchange,
+            trades,
+            dry_run,
+            results,
+            progress=progress,
+            progress_labels=progress_labels,
+        )
         if dry_run:
             return True
         orders_needing_fallback = _wait_for_order_completion(
@@ -795,10 +996,28 @@ def execute_trades(plan: List[Dict]):
             results,
             timeout_seconds=ORDER_TIMEOUT_SECONDS,
             poll_interval_seconds=ORDER_POLL_INTERVAL_SECONDS,
+            progress=progress,
         )
         if orders_needing_fallback:
-            _cancel_and_market_fallback(orders_needing_fallback, results)
-        return not is_rebalance_cancel_requested()
+            _cancel_and_market_fallback(
+                orders_needing_fallback, results, progress=progress
+            )
+        cancelled = is_rebalance_cancel_requested()
+        if not cancelled and progress is not None:
+            progress.current_trade = None
+        return not cancelled
+
+    def report_cancellation(fallback_message: str) -> None:
+        active_trade = getattr(progress, "current_trade", None)
+        if active_trade:
+            detail = f"⏹️ Cancellation received during {active_trade}."
+            if detail not in results:
+                results.append(detail)
+            report_progress(
+                progress, f"⏹️ Rebalance cancelled during {active_trade}."
+            )
+        else:
+            report_progress(progress, fallback_message)
 
     short_reductions = [
         trade for trade in plan if trade["action"] in {"reduce_short", "cover_short"}
@@ -808,11 +1027,11 @@ def execute_trades(plan: List[Dict]):
     ]
 
     if short_reductions:
-        cover_warnings = validate_quote_balances(
-            short_reductions, reserved_quote_balances=reserved_sdca_cash
+        cover_check = validate_quote_balances(
+            short_reductions
         )
-        if cover_warnings:
-            results.extend(cover_warnings)
+        results.extend(cover_check.warnings)
+        if cover_check.insufficient:
             results.append(
                 "⏸️ Short reductions paused until the required quote funds are available."
             )
@@ -820,21 +1039,25 @@ def execute_trades(plan: List[Dict]):
 
     if short_reductions and not execute_phase(short_reductions):
         results.append("⏹️ Rebalance cancelled after reducing or covering shorts.")
+        report_cancellation("⏹️ Rebalance cancelled after reducing or covering shorts.")
         return results
     if long_reductions and not execute_phase(long_reductions):
         results.append("⏹️ Rebalance cancelled after reducing spot longs.")
+        report_cancellation("⏹️ Rebalance cancelled after reducing spot longs.")
         return results
 
     if dry_run:
         remaining_plan = plan
     else:
+        report_progress(progress, "Recalculating remaining RSPS targets…")
         results.append(
             "🔄 Recalculating remaining targets from the post-reduction portfolio..."
         )
         try:
-            remaining_plan = generate_rebalance_plan().get("plan", [])
+            remaining_plan = generate_rebalance_plan(progress=progress).get("plan", [])
         except Exception as e:
             results.append(f"❌ Failed to regenerate the remaining plan: {e}")
+            report_progress(progress, f"❌ Failed to regenerate remaining plan: {e}")
             return results
 
     opening_trades = [
@@ -899,11 +1122,11 @@ def execute_trades(plan: List[Dict]):
 
     spending_trades = short_openings + long_openings
     if spending_trades:
-        opening_warnings = validate_quote_balances(
-            spending_trades, reserved_quote_balances=reserved_sdca_cash
+        opening_check = validate_quote_balances(
+            spending_trades
         )
-        if opening_warnings:
-            results.extend(opening_warnings)
+        results.extend(opening_check.warnings)
+        if opening_check.insufficient:
             results.append(
                 "⏸️ New positions paused until the required quote funds are available."
             )
@@ -911,13 +1134,18 @@ def execute_trades(plan: List[Dict]):
 
     if short_openings and not execute_phase(short_openings):
         results.append("⏹️ Rebalance cancelled after opening or increasing shorts.")
+        report_cancellation("⏹️ Rebalance cancelled after opening or increasing shorts.")
         return results
     if long_openings and not execute_phase(long_openings):
         results.append("⏹️ Rebalance cancelled after opening or increasing longs.")
+        report_cancellation("⏹️ Rebalance cancelled after opening or increasing longs.")
         return results
 
     if is_rebalance_cancel_requested():
         results.append(
+            "⏹️ Rebalance has been cancelled. No further trades will be placed."
+        )
+        report_cancellation(
             "⏹️ Rebalance has been cancelled. No further trades will be placed."
         )
 

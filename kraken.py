@@ -1,14 +1,40 @@
 import ccxt
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Set
 
 QUOTE_CURRENCY = "USD"
 STABLE_COINS: Set[str] = {"USD", "USDC", "USDG"}
+STABLE_COIN_ORDER = ("USD", "USDC", "USDG")
 
 _exchange = None
+
+
+@dataclass
+class QuoteBalanceCheck:
+    warnings: List[str]
+    insufficient: bool
+
+
+def _consume_stable_pool(
+    balances: Dict[str, float], amount: float, preferred_quote: str
+) -> None:
+    """Deduct a funded trade from its quote first, then other interchangeable stables."""
+    remaining = amount
+    order = [preferred_quote] + [
+        stable for stable in STABLE_COIN_ORDER if stable != preferred_quote
+    ]
+    for stable in order:
+        if stable not in balances:
+            continue
+        spent = min(max(0.0, balances[stable]), remaining)
+        balances[stable] -= spent
+        remaining -= spent
+        if remaining <= 0:
+            break
 
 
 def _quote_currency(symbol: str) -> str:
@@ -555,35 +581,17 @@ def cancel_open_orders(symbols: List[str] | None = None) -> List[str]:
 
 
 def validate_quote_balances(
-    plan: List[Dict], reserved_quote_balances: Dict[str, float] | None = None
-) -> List[str]:
-    """Check available quote funds after preserving other strategies' reserves."""
+    plan: List[Dict],
+) -> QuoteBalanceCheck:
+    """Check quote funding against the combined USD, USDC, and USDG pool."""
     warnings = []
-    # Start with current free balances for stables only
     exchange = get_kraken_exchange()
     balance = exchange.fetch_balance()["free"]
-    projected = {s: balance.get(s, 0.0) for s in STABLE_COINS}
-    for quote, amount in (reserved_quote_balances or {}).items():
-        quote = quote.upper()
-        if quote in projected:
-            projected[quote] = max(0.0, projected[quote] - max(0.0, amount))
-    reserved_short_proceeds = {s: 0.0 for s in STABLE_COINS}
-
-    for position in fetch_margin_positions():
-        quote = _quote_currency(position["symbol"])
-        if position["side"] == "short" and quote in projected:
-            reserved_short_proceeds[quote] += (
-                position["entry_price"] * position["size_base"]
-            )
-
-    # Only spot long reductions add quote funds.
-    for trade in plan:
-        if trade["action"] in {"reduce_long", "close_long", "sell"} and not trade.get(
-            "margin", False
-        ):
-            quote = _quote_currency(trade["symbol"])
-            if quote in projected:
-                projected[quote] += trade["amount_usd"]
+    projected = {
+        stable: float(balance.get(stable, 0.0) or 0.0)
+        for stable in STABLE_COIN_ORDER
+    }
+    insufficient = False
 
     for trade in plan:
         quote = _quote_currency(trade["symbol"])
@@ -597,18 +605,36 @@ def validate_quote_balances(
         else:
             continue
 
-        available = projected.get(quote, 0.0)
-        if action in {"open_short", "increase_short"}:
-            available = max(0.0, available - reserved_short_proceeds.get(quote, 0.0))
-        if available < needed:
-            shortfall = needed - available
+        total_available = sum(projected.values())
+        quote_available = projected.get(quote, 0.0)
+
+        if total_available < needed:
+            shortfall = needed - total_available
             warnings.append(
-                f"⚠️ CONVERSION NEEDED: {trade['action'].replace('_', ' ')} "
-                f"{trade['asset']}/{quote} requires ${shortfall:,.2f} more {quote}. "
-                f"Only ${available:,.2f} {quote} is available after reserving "
-                "existing short proceeds and required margin capital. Fund the "
-                "quote balance or convert from another stablecoin if needed."
+                f"⚠️ insufficient stables: "
+                f"{trade['action'].replace('_', ' ')} {trade['asset']}/{quote} "
+                f"requires ${shortfall:,.2f} more {quote}. "
+                f"Total available: ${total_available:,.2f}."
             )
-        else:
-            projected[quote] -= needed
-    return warnings
+            insufficient = True
+            continue
+
+        if quote_available < needed:
+            quote_shortfall = needed - quote_available
+            source_stables = [
+                (stable, amount)
+                for stable, amount in projected.items()
+                if stable != quote and amount > 0
+            ]
+            source_stable = max(source_stables, key=lambda item: item[1])[0]
+            warnings.append(
+                f"⚠️ CONVERSION NEEDED: convert ${quote_shortfall:,.2f} "
+                f"{source_stable} → {quote} to "
+                f"{trade['action'].replace('_', ' ')} "
+                f"{trade['asset']}/{quote}."
+            )
+            insufficient = True
+            continue
+        _consume_stable_pool(projected, needed, quote)
+
+    return QuoteBalanceCheck(warnings=warnings, insufficient=insufficient)

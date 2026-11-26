@@ -101,7 +101,7 @@ class SignalRoutingTests(unittest.IsolatedAsyncioTestCase):
         status_message.edit_text.assert_awaited_once()
         self.assertIn("25.00% (sell)", status_message.edit_text.await_args.args[0])
 
-    async def test_sdca_plan_prompts_for_conversion_without_execute_button(self):
+    async def test_sdca_plan_blocks_when_combined_stables_are_insufficient(self):
         warning = "⚠️ CONVERSION NEEDED: buy BTC/USD requires $20.00 more USD."
         status_message = Mock()
         status_message.edit_text = AsyncMock()
@@ -122,6 +122,7 @@ class SignalRoutingTests(unittest.IsolatedAsyncioTestCase):
             "cold_btc": 0.0,
             "dry_run": False,
             "quote_warnings": [warning],
+            "quote_insufficient": True,
         }
         response = Mock()
         response.raise_for_status = Mock()
@@ -140,7 +141,52 @@ class SignalRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         text = status_message.edit_text.await_args.args[0]
         self.assertIn(warning, text)
-        self.assertIn("run /sdca again", text)
+        self.assertIn("Execution paused", text)
+        self.assertNotIn("reply_markup", status_message.edit_text.await_args.kwargs)
+
+    async def test_sdca_plan_blocks_confirmation_when_conversion_is_needed(self):
+        warning = (
+            "⚠️ CONVERSION NEEDED: Convert $22.05 USDG → USD to buy BTC/USD."
+        )
+        status_message = Mock()
+        status_message.edit_text = AsyncMock()
+        message = Mock()
+        message.reply_text = AsyncMock(return_value=status_message)
+        update = Mock()
+        update.effective_user.id = 1
+        update.message = message
+        context = Mock()
+        context.args = []
+
+        plan = {
+            "action": "buy",
+            "amount_base": 0.0002,
+            "amount_usd": 20.0,
+            "cash_usd": 200.0,
+            "kraken_btc": 0.0,
+            "cold_btc": 0.0,
+            "dry_run": False,
+            "quote_warnings": [warning],
+            "quote_insufficient": True,
+        }
+        response = Mock()
+        response.raise_for_status = Mock()
+        response.json.return_value = plan
+        client = Mock()
+        client.get = AsyncMock(return_value=response)
+        async_client = Mock()
+        async_client.__aenter__ = AsyncMock(return_value=client)
+        async_client.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("bot.ALLOWED_USER_ID", 1),
+            patch("bot.httpx.AsyncClient", return_value=async_client),
+        ):
+            await bot.sdca_command(update, context)
+
+        text = status_message.edit_text.await_args.args[0]
+        self.assertIn(warning, text)
+        self.assertIn("Execution paused", text)
         self.assertNotIn("reply_markup", status_message.edit_text.await_args.kwargs)
 
     async def test_sdca_execute_failure_includes_api_response_detail(self):
@@ -149,6 +195,8 @@ class SignalRoutingTests(unittest.IsolatedAsyncioTestCase):
         query.data = "sdca_confirm"
         query.answer = AsyncMock()
         query.edit_message_text = AsyncMock()
+        query.message.chat_id = 123
+        query.message.message_id = 456
         update = Mock()
         update.callback_query = query
 
@@ -169,10 +217,54 @@ class SignalRoutingTests(unittest.IsolatedAsyncioTestCase):
         ):
             await bot.button_callback(update, Mock())
 
+        client.post.assert_awaited_once_with(
+            "http://localhost/sdca/execute",
+            json={"chat_id": 123, "message_id": 456},
+            headers={"X-API-Key": bot.REBALANCER_API_KEY},
+        )
         query.edit_message_text.assert_awaited()
         self.assertIn(
             "SDCA order amount is below Kraken's BTC precision",
             query.edit_message_text.await_args_list[-1].args[0],
+        )
+
+    async def test_rsps_execute_passes_message_identifiers_and_uses_reported_final(self):
+        query = Mock()
+        query.from_user.id = 1
+        query.data = "confirm"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        query.message.chat_id = 123
+        query.message.message_id = 456
+        update = Mock()
+        update.callback_query = query
+
+        response = Mock()
+        response.raise_for_status = Mock()
+        response.json.return_value = {
+            "results": ["Filled BTC buy"],
+            "progress_reported": True,
+        }
+        client = Mock()
+        client.post = AsyncMock(return_value=response)
+        async_client = Mock()
+        async_client.__aenter__ = AsyncMock(return_value=client)
+        async_client.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("bot.ALLOWED_USER_ID", 1),
+            patch("bot.REBALANCER_API_KEY", "test-key"),
+            patch("bot.httpx.AsyncClient", return_value=async_client),
+        ):
+            await bot.button_callback(update, Mock())
+
+        client.post.assert_awaited_once_with(
+            "http://localhost/rebalance/execute",
+            json={"chat_id": 123, "message_id": 456},
+            headers={"X-API-Key": "test-key"},
+        )
+        query.edit_message_text.assert_awaited_once_with(
+            "🔄 Refreshing allocations…"
         )
 
     async def test_mixed_titles_reply_without_calling_api(self):

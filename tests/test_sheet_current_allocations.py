@@ -9,11 +9,53 @@ from sheets import (
     get_sdca_cash_on_kraken,
     get_sdca_sheet_values,
     update_current_allocations_in_sheet,
+    update_sdca_cash_after_fill,
     update_sdca_change_in_sheet,
 )
 
 
 class UpdateCurrentAllocationsTests(unittest.TestCase):
+    def test_allocation_refresh_writes_raw_stable_balances(self):
+        worksheet = Mock()
+        worksheet.get_values.side_effect = lambda cell_range: {
+            "A8:A": [["BTC"]],
+            "H8:H": [["USD"], ["USDG"]],
+        }[cell_range]
+        client = Mock()
+        client.open_by_key.return_value.worksheet.return_value = worksheet
+        portfolio = (
+            {},
+            {},
+            {},
+            {},
+            50_000.0,
+            {"USD": 179.0, "USDC": 0.0, "USDG": 36_531.0},
+        )
+
+        with (
+            patch.dict(os.environ, {"GOOGLE_DOCS_SHEET_ID": "test-sheet"}),
+            patch("sheets.fetch_portfolio", return_value=portfolio),
+            patch("sheets.get_gspread_client", return_value=client),
+            patch(
+                "sheets.get_sdca_sheet_values",
+                return_value={
+                    "cash_usd": 0.0,
+                    "change_pct": 0.0,
+                    "kraken_btc": 0.0,
+                    "cold_btc": 0.0,
+                },
+            ),
+            patch("sheets.get_sdca_cash_on_kraken", return_value=14_160.0),
+            patch("sheets.get_btc_cold_balance", return_value=0.0),
+            patch("sheets.get_btc_usd_price", return_value=50_000.0),
+            patch("sheets.get_kraken_btc_balance", return_value=0.0),
+        ):
+            update_current_allocations_in_sheet()
+
+        worksheet.update.assert_any_call(
+            "I8:I9", [[179.0], [36_531.0]], value_input_option="RAW"
+        )
+
     def test_writes_short_used_margin_as_positive_current_allocation(self):
         worksheet = Mock()
         worksheet.get_values.return_value = [["BTC"]]
@@ -81,7 +123,7 @@ class UpdateCurrentAllocationsTests(unittest.TestCase):
                     "cold_btc": 0.2,
                 },
             ),
-            patch("sheets.get_sdca_cash_on_kraken", return_value=50.0),
+            patch("sheets.get_sdca_cash_on_kraken", return_value=50.0) as get_cash,
             patch("sheets.get_btc_cold_balance", return_value=0.25),
             patch("sheets.get_btc_usd_price", return_value=50_000.0),
             patch("sheets.get_kraken_btc_balance", return_value=0.5),
@@ -92,7 +134,8 @@ class UpdateCurrentAllocationsTests(unittest.TestCase):
         worksheet.update.assert_any_call(
             "E8:E8", [[22_500.0]], value_input_option="RAW"
         )
-        worksheet.update.assert_any_call("I8:I8", [[450.0]], value_input_option="RAW")
+        worksheet.update.assert_any_call("I8:I8", [[500.0]], value_input_option="RAW")
+        get_cash.assert_not_called()
         worksheet.batch_update.assert_called_once_with(
             [
                 {"range": "Q7", "values": [[0.05]]},
@@ -104,6 +147,58 @@ class UpdateCurrentAllocationsTests(unittest.TestCase):
 
 
 class SdcaSheetTests(unittest.TestCase):
+    def test_sdca_buy_subtracts_filled_cost_from_both_cash_cells(self):
+        worksheet = Mock()
+        worksheet.acell.side_effect = lambda cell: Mock(
+            value={"B4": "$100.00", "B5": "$40.00"}[cell]
+        )
+        client = Mock()
+        client.open_by_key.return_value.worksheet.return_value = worksheet
+        with (
+            patch.dict(os.environ, {"GOOGLE_DOCS_SHEET_ID": "test-sheet"}),
+            patch("sheets.get_gspread_client", return_value=client),
+        ):
+            updated = update_sdca_cash_after_fill("buy", 12.5)
+
+        self.assertEqual(updated, {"usd_left": 87.5, "cash_on_kraken": 27.5})
+        worksheet.batch_update.assert_called_once_with(
+            [
+                {"range": "B4", "values": [[87.5]]},
+                {"range": "B5", "values": [[27.5]]},
+            ],
+            value_input_option="RAW",
+        )
+
+    def test_sdca_sell_adds_net_proceeds_to_both_cash_cells(self):
+        worksheet = Mock()
+        worksheet.acell.side_effect = lambda cell: Mock(
+            value={"B4": "100", "B5": "40"}[cell]
+        )
+        client = Mock()
+        client.open_by_key.return_value.worksheet.return_value = worksheet
+        with (
+            patch.dict(os.environ, {"GOOGLE_DOCS_SHEET_ID": "test-sheet"}),
+            patch("sheets.get_gspread_client", return_value=client),
+        ):
+            updated = update_sdca_cash_after_fill("sell", 9.75)
+
+        self.assertEqual(updated, {"usd_left": 109.75, "cash_on_kraken": 49.75})
+
+    def test_sdca_cash_updates_are_floored_at_zero(self):
+        worksheet = Mock()
+        worksheet.acell.side_effect = lambda cell: Mock(
+            value={"B4": "5", "B5": "0"}[cell]
+        )
+        client = Mock()
+        client.open_by_key.return_value.worksheet.return_value = worksheet
+        with (
+            patch.dict(os.environ, {"GOOGLE_DOCS_SHEET_ID": "test-sheet"}),
+            patch("sheets.get_gspread_client", return_value=client),
+        ):
+            updated = update_sdca_cash_after_fill("buy", 10)
+
+        self.assertEqual(updated, {"usd_left": 0.0, "cash_on_kraken": 0.0})
+
     def test_sdca_sheet_reader_accepts_signed_decimal_change(self):
         worksheet = Mock()
         worksheet.acell.side_effect = lambda cell: Mock(
@@ -172,7 +267,7 @@ class SdcaSheetTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-negative"):
                 get_sdca_cash_on_kraken()
 
-    def test_allocation_refresh_subtracts_q6_not_q3_and_does_not_write_either(self):
+    def test_allocation_refresh_writes_raw_stables_without_reading_q6_or_q3(self):
         worksheet = Mock()
         worksheet.get_values.side_effect = lambda cell_range: (
             [["USD"]] if cell_range in {"A8:A", "H8:H"} else []
@@ -201,7 +296,7 @@ class SdcaSheetTests(unittest.TestCase):
                     "cold_btc": 0.0,
                 },
             ),
-            patch("sheets.get_sdca_cash_on_kraken", return_value=100.0),
+            patch("sheets.get_sdca_cash_on_kraken", return_value=100.0) as get_cash,
             patch("sheets.get_btc_cold_balance", return_value=0.0),
             patch("sheets.get_btc_usd_price", return_value=50_000.0),
             patch("sheets.get_kraken_btc_balance", return_value=0.0),
@@ -209,7 +304,8 @@ class SdcaSheetTests(unittest.TestCase):
             update_current_allocations_in_sheet()
 
         worksheet.update.assert_any_call("E8:E8", [[0.0]], value_input_option="RAW")
-        worksheet.update.assert_any_call("I8:I8", [[300.0]], value_input_option="RAW")
+        worksheet.update.assert_any_call("I8:I8", [[400.0]], value_input_option="RAW")
+        get_cash.assert_not_called()
         for call in worksheet.update.call_args_list:
             self.assertNotIn(call.args[0], {"Q3", "Q6"})
         for batch in worksheet.batch_update.call_args_list:

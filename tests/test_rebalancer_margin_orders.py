@@ -28,12 +28,21 @@ class RebalancerMarginOrderTests(unittest.TestCase):
                 "rebalancer.create_post_only_limit_order",
                 return_value={"id": "order-1"},
             ) as create_order,
+            patch("rebalancer.report_progress") as report,
         ):
-            orders = rebalancer._submit_trade_orders(exchange, [trade], False, [])
+            orders = rebalancer._submit_trade_orders(
+                exchange, [trade], False, [], progress=Mock()
+            )
 
         self.assertEqual(orders[0]["symbol"], "ETH/USD:BTNL")
         create_order.assert_called_once_with(
             "ETH/USD", "buy", 2, 99, margin=True, reduce_only=True
+        )
+        messages = [call.args[1] for call in report.call_args_list]
+        self.assertTrue(any("Closing ETH short (1/1)" in text for text in messages))
+        self.assertTrue(any("placing post-only order" in text for text in messages))
+        self.assertTrue(
+            any("post-only order placed; waiting for fill" in text for text in messages)
         )
 
     def test_failed_refresh_falls_back_to_original_amount_on_margin_symbol(self):
@@ -54,14 +63,52 @@ class RebalancerMarginOrderTests(unittest.TestCase):
             patch(
                 "rebalancer.create_market_order", return_value={"id": "market-1"}
             ) as create_market,
+            patch("rebalancer.report_progress") as report,
         ):
-            rebalancer._cancel_and_market_fallback([order], [])
+            rebalancer._cancel_and_market_fallback(
+                [order], [], progress=Mock()
+            )
 
         fetch_order.assert_called_once_with("order-1", "ETH/USD:BTNL")
         cancel_order.assert_called_once_with("order-1")
         create_market.assert_called_once_with(
             "ETH/USD:BTNL", "buy", 2, margin=True, reduce_only=True
         )
+        messages = [call.args[1] for call in report.call_args_list]
+        self.assertTrue(any("falling back to market" in text for text in messages))
+        self.assertTrue(any("market fallback order placed" in text for text in messages))
+
+    def test_cancel_progress_includes_the_active_trade(self):
+        order = {
+            "order_id": "order-1",
+            "symbol": "ETH/USD:BTNL",
+            "side": "buy",
+            "amount_base": 2,
+            "asset": "ETH",
+            "action": "cover_short",
+            "margin": True,
+            "reduce_only": True,
+            "progress_label": "Closing ETH short (1/1)",
+        }
+        results = []
+        with (
+            patch("rebalancer.is_rebalance_cancel_requested", return_value=True),
+            patch("rebalancer.report_progress") as report,
+        ):
+            fallback_orders = rebalancer._wait_for_order_completion(
+                [order],
+                results,
+                timeout_seconds=10,
+                poll_interval_seconds=0,
+                progress=Mock(),
+            )
+
+        self.assertEqual(fallback_orders, [order])
+        self.assertIn(
+            "⏹️ Cancellation received during Closing ETH short (1/1).",
+            results,
+        )
+        self.assertIn("Closing ETH short (1/1)", report.call_args.args[1])
 
     def test_terminal_order_needing_fallback_is_returned(self):
         order = {
@@ -129,10 +176,10 @@ class RebalancerMarginOrderTests(unittest.TestCase):
             patch("rebalancer.os.getenv", return_value="false"),
             patch("rebalancer.get_kraken_exchange"),
             patch("rebalancer.cancel_open_orders", return_value=[]) as cancel,
-            patch("rebalancer.validate_quote_balances", return_value=[]) as validate,
             patch(
-                "rebalancer.get_sdca_cash_on_kraken", return_value=25.0
-            ) as get_cash_on_kraken,
+                "rebalancer.validate_quote_balances",
+                return_value=Mock(warnings=[], insufficient=False),
+            ) as validate,
             patch(
                 "rebalancer.get_sdca_sheet_values",
                 return_value={
@@ -149,10 +196,42 @@ class RebalancerMarginOrderTests(unittest.TestCase):
             rebalancer.execute_trades(plan)
 
         cancel.assert_called_once_with(["ETH/USD", "ETH/USD:BTNL"])
-        get_cash_on_kraken.assert_called_once_with()
-        validate.assert_called_once_with(
-            plan, reserved_quote_balances={"USD": 25.0}
-        )
+        validate.assert_called_once_with(plan)
+
+    def test_rsps_does_not_submit_opening_trade_when_funding_is_insufficient(self):
+        trade = {
+            "symbol": "ETH/USD",
+            "asset": "ETH",
+            "action": "open_long",
+            "amount_usd": 22.0,
+            "capital_usd": 22.0,
+        }
+        warning = "⚠️ CONVERSION NEEDED: convert $22.00 USDG → USD to open long ETH/USD."
+        with (
+            patch("rebalancer.os.getenv", return_value="false"),
+            patch("rebalancer.get_kraken_exchange"),
+            patch("rebalancer.cancel_open_orders", return_value=[]),
+            patch(
+                "rebalancer.generate_rebalance_plan",
+                return_value={"plan": [trade]},
+            ),
+            patch(
+                "rebalancer.fetch_portfolio",
+                return_value=({}, {}, {}, {}, 0.0, {}),
+            ),
+            patch("rebalancer.fetch_margin_positions", return_value=[]),
+            patch(
+                "rebalancer.validate_quote_balances",
+                return_value=Mock(warnings=[warning], insufficient=True),
+            ) as validate,
+            patch("rebalancer._submit_trade_orders") as submit_orders,
+        ):
+            result = rebalancer.execute_trades([trade])
+
+        self.assertIn(warning, result)
+        self.assertTrue(any("New positions paused" in line for line in result))
+        validate.assert_called_once_with([trade])
+        submit_orders.assert_not_called()
 
 
 if __name__ == "__main__":
