@@ -12,6 +12,7 @@ from sheets import (
     get_sdca_cash_on_kraken,
     get_sdca_sheet_values,
     update_current_allocations_in_sheet,
+    update_sdca_cash_after_fill,
     update_sdca_change_in_sheet,
 )
 from kraken import (
@@ -669,6 +670,7 @@ def execute_sdca_trade(
 
     report_progress(progress, f"{trade_label} — filled.")
     report_progress(progress, "Updating sheet…")
+    updated_cash = update_sdca_cash_after_fill(action, actual_quote_amount)
     update_current_allocations_in_sheet(
         sdca_btc_adjustment=btc_delta, force_cold_balance_refresh=True
     )
@@ -678,6 +680,10 @@ def execute_sdca_trade(
     results.append(
         f"✅ SDCA {action.upper()} filled: {abs(btc_delta):.8f} BTC, "
         f"${actual_quote_amount:.2f} {'spent' if action == 'buy' else 'proceeds'}."
+    )
+    results.append(
+        f"💵 SDCA USD Left: ${updated_cash['usd_left']:.2f}; "
+        f"SDCA Cash on Kraken: ${updated_cash['cash_on_kraken']:.2f}."
     )
     results.append("✅ Change % Today cleared.")
     if action == "buy":

@@ -300,6 +300,46 @@ def update_sdca_change_in_sheet(change_pct: float) -> None:
     )
 
 
+def update_sdca_cash_after_fill(
+    action: str, actual_quote_amount_usd: float
+) -> dict[str, float]:
+    """Apply a filled SDCA trade to Values To Edit!B4 and B5."""
+    if action not in {"buy", "sell"}:
+        raise ValueError(f"Unsupported SDCA cash action: {action!r}")
+
+    amount = float(actual_quote_amount_usd)
+    if not math.isfinite(amount) or amount < 0:
+        raise ValueError("SDCA fill amount must be finite and non-negative")
+
+    spreadsheet_id = os.getenv("GOOGLE_DOCS_SHEET_ID")
+    if not spreadsheet_id:
+        raise ValueError("GOOGLE_DOCS_SHEET_ID not set in .env")
+
+    worksheet = get_gspread_client().open_by_key(spreadsheet_id).worksheet(
+        "Values To Edit"
+    )
+    usd_left = _parse_sheet_numeric_value(
+        worksheet.acell("B4").value, "Values To Edit!B4"
+    )
+    cash_on_kraken = _parse_sheet_numeric_value(
+        worksheet.acell("B5").value, "Values To Edit!B5"
+    )
+    delta = amount if action == "sell" else -amount
+    updated = {
+        "usd_left": max(0.0, usd_left + delta),
+        "cash_on_kraken": max(0.0, cash_on_kraken + delta),
+    }
+
+    worksheet.batch_update(
+        [
+            {"range": "B4", "values": [[updated["usd_left"]]]},
+            {"range": "B5", "values": [[updated["cash_on_kraken"]]]},
+        ],
+        value_input_option="RAW",
+    )
+    return updated
+
+
 def _derive_trezor_receive_address(account_key: bip32.HDKey, index: int) -> str:
     child_key = account_key.derive([0, index]).key
     version = account_key.version

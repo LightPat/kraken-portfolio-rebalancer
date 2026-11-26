@@ -9,6 +9,7 @@ from sheets import (
     get_sdca_cash_on_kraken,
     get_sdca_sheet_values,
     update_current_allocations_in_sheet,
+    update_sdca_cash_after_fill,
     update_sdca_change_in_sheet,
 )
 
@@ -104,6 +105,58 @@ class UpdateCurrentAllocationsTests(unittest.TestCase):
 
 
 class SdcaSheetTests(unittest.TestCase):
+    def test_sdca_buy_subtracts_filled_cost_from_both_cash_cells(self):
+        worksheet = Mock()
+        worksheet.acell.side_effect = lambda cell: Mock(
+            value={"B4": "$100.00", "B5": "$40.00"}[cell]
+        )
+        client = Mock()
+        client.open_by_key.return_value.worksheet.return_value = worksheet
+        with (
+            patch.dict(os.environ, {"GOOGLE_DOCS_SHEET_ID": "test-sheet"}),
+            patch("sheets.get_gspread_client", return_value=client),
+        ):
+            updated = update_sdca_cash_after_fill("buy", 12.5)
+
+        self.assertEqual(updated, {"usd_left": 87.5, "cash_on_kraken": 27.5})
+        worksheet.batch_update.assert_called_once_with(
+            [
+                {"range": "B4", "values": [[87.5]]},
+                {"range": "B5", "values": [[27.5]]},
+            ],
+            value_input_option="RAW",
+        )
+
+    def test_sdca_sell_adds_net_proceeds_to_both_cash_cells(self):
+        worksheet = Mock()
+        worksheet.acell.side_effect = lambda cell: Mock(
+            value={"B4": "100", "B5": "40"}[cell]
+        )
+        client = Mock()
+        client.open_by_key.return_value.worksheet.return_value = worksheet
+        with (
+            patch.dict(os.environ, {"GOOGLE_DOCS_SHEET_ID": "test-sheet"}),
+            patch("sheets.get_gspread_client", return_value=client),
+        ):
+            updated = update_sdca_cash_after_fill("sell", 9.75)
+
+        self.assertEqual(updated, {"usd_left": 109.75, "cash_on_kraken": 49.75})
+
+    def test_sdca_cash_updates_are_floored_at_zero(self):
+        worksheet = Mock()
+        worksheet.acell.side_effect = lambda cell: Mock(
+            value={"B4": "5", "B5": "0"}[cell]
+        )
+        client = Mock()
+        client.open_by_key.return_value.worksheet.return_value = worksheet
+        with (
+            patch.dict(os.environ, {"GOOGLE_DOCS_SHEET_ID": "test-sheet"}),
+            patch("sheets.get_gspread_client", return_value=client),
+        ):
+            updated = update_sdca_cash_after_fill("buy", 10)
+
+        self.assertEqual(updated, {"usd_left": 0.0, "cash_on_kraken": 0.0})
+
     def test_sdca_sheet_reader_accepts_signed_decimal_change(self):
         worksheet = Mock()
         worksheet.acell.side_effect = lambda cell: Mock(
