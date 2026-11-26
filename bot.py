@@ -1,3 +1,4 @@
+import math
 import os
 import re
 import httpx
@@ -32,6 +33,28 @@ USD_DECIMALS = 2
 PRICE_DECIMALS = 4
 
 
+def parse_sdca_override(value: str) -> float:
+    """Convert a decimal fraction or percentage input to a signed fraction."""
+    raw_value = value.strip()
+    has_percent_sign = raw_value.endswith("%")
+    numeric_text = raw_value[:-1].strip() if has_percent_sign else raw_value
+    try:
+        numeric_value = float(numeric_text)
+    except ValueError as exc:
+        raise ValueError("Enter one signed percentage or decimal fraction.") from exc
+    if not math.isfinite(numeric_value):
+        raise ValueError("The SDCA change must be a finite number.")
+
+    change_pct = (
+        numeric_value / 100
+        if has_percent_sign or abs(numeric_value) > 1
+        else numeric_value
+    )
+    if abs(change_pct) > 1:
+        raise ValueError("SDCA Change % Today must be between -100% and 100%.")
+    return change_pct
+
+
 def detect_signal_type(text: str) -> str | None:
     sdca_signal = re.search(r"\bSDCA\s+Signal\s+Update\b", text, re.IGNORECASE)
     rsps_signal = re.search(
@@ -49,7 +72,48 @@ def detect_signal_type(text: str) -> str | None:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 Kraken Rebalancer ready!\n\nCommands:\n"
-        "/rebalance\n/sdca\n\n/updateCurrentAllocations"
+        "/rebalance\n/sdca\n/sdcaSet <value>\n\n/updateCurrentAllocations"
+    )
+
+
+async def sdca_set_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER_ID:
+        await update.message.reply_text("❌ Unauthorized")
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text(
+            "Usage: /sdcaSet <signed percentage or decimal fraction>"
+        )
+        return
+
+    try:
+        change_pct = parse_sdca_override(context.args[0])
+    except ValueError as exc:
+        await update.message.reply_text(f"❌ {exc} No sheet changes were made.")
+        return
+
+    status_message = await update.message.reply_text(
+        "🔄 Updating SDCA Change % Today..."
+    )
+    try:
+        timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                f"{FASTAPI_URL}/updateSdcaChange",
+                json={"change_pct": change_pct},
+                headers={"X-API-Key": REBALANCER_API_KEY},
+            )
+            resp.raise_for_status()
+    except Exception as exc:
+        await status_message.edit_text(
+            f"❌ SDCA override failed: {type(exc).__name__}: {exc}"
+        )
+        return
+
+    direction = "buy" if change_pct > 0 else "sell" if change_pct < 0 else "no change"
+    await status_message.edit_text(
+        f"✅ SDCA Change % Today set to {abs(change_pct) * 100:.2f}% "
+        f"({direction})."
     )
 
 
@@ -370,6 +434,7 @@ def main():
     )
     app.add_handler(CommandHandler("rebalance", rebalance_command))
     app.add_handler(CommandHandler("sdca", sdca_command))
+    app.add_handler(CommandHandler("sdcaSet", sdca_set_command))
     app.add_handler(CommandHandler("cancelRebalance", cancel_rebalance_command))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(

@@ -166,11 +166,28 @@ class SdcaCashAccountingTests(unittest.TestCase):
         with (
             patch("rebalancer.generate_sdca_plan", return_value=plan),
             patch("rebalancer.update_current_allocations_in_sheet") as refresh,
+            patch("rebalancer.update_sdca_change_in_sheet") as clear_change,
         ):
             result = rebalancer.execute_sdca_trade()
 
         refresh.assert_called_once_with()
+        clear_change.assert_not_called()
         self.assertTrue(result["dry_run"])
+
+    def test_noop_trade_does_not_clear_change_pct(self):
+        plan = {
+            "action": None,
+            "amount_base": 0.0,
+            "dry_run": False,
+        }
+        with (
+            patch("rebalancer.generate_sdca_plan", return_value=plan),
+            patch("rebalancer.update_sdca_change_in_sheet") as clear_change,
+        ):
+            result = rebalancer.execute_sdca_trade()
+
+        clear_change.assert_not_called()
+        self.assertIn("nothing to do", result["results"][0])
 
     def test_buy_subtracts_actual_spend_from_sdca_cash(self):
         self.assertAlmostEqual(
@@ -222,6 +239,7 @@ class SdcaCashAccountingTests(unittest.TestCase):
             ),
             patch("rebalancer.update_sdca_cash_in_sheet") as update_cash,
             patch("rebalancer.update_current_allocations_in_sheet") as update_allocations,
+            patch("rebalancer.update_sdca_change_in_sheet") as clear_change,
         ):
             get_exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
             result = rebalancer.execute_sdca_trade()
@@ -230,7 +248,29 @@ class SdcaCashAccountingTests(unittest.TestCase):
         update_allocations.assert_called_once_with(
             sdca_btc_adjustment=0.1, force_cold_balance_refresh=True
         )
+        clear_change.assert_called_once_with(0.0)
         self.assertAlmostEqual(result["actual_quote_amount_usd"], 10.1)
+        self.assertTrue(
+            any("Change % Today cleared." in line for line in result["results"])
+        )
+
+    def test_failed_trade_does_not_clear_change_pct(self):
+        plan = {
+            "action": "buy",
+            "symbol": "BTC/USD",
+            "amount_usd": 10.0,
+            "amount_base": 0.1,
+            "dry_run": False,
+        }
+        with (
+            patch("rebalancer.generate_sdca_plan", return_value=plan),
+            patch("rebalancer.get_free_balance", return_value=0.0),
+            patch("rebalancer.update_sdca_change_in_sheet") as clear_change,
+        ):
+            with self.assertRaisesRegex(ValueError, "only \\$0.00 USD"):
+                rebalancer.execute_sdca_trade()
+
+        clear_change.assert_not_called()
 
     def test_sell_returns_actual_proceeds_and_reduces_tracked_btc(self):
         plan = {
@@ -271,6 +311,7 @@ class SdcaCashAccountingTests(unittest.TestCase):
             ),
             patch("rebalancer.update_sdca_cash_in_sheet") as update_cash,
             patch("rebalancer.update_current_allocations_in_sheet") as update_allocations,
+            patch("rebalancer.update_sdca_change_in_sheet") as clear_change,
         ):
             get_exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
             result = rebalancer.execute_sdca_trade()
@@ -279,6 +320,7 @@ class SdcaCashAccountingTests(unittest.TestCase):
         update_allocations.assert_called_once_with(
             sdca_btc_adjustment=-0.04, force_cold_balance_refresh=True
         )
+        clear_change.assert_called_once_with(0.0)
         self.assertAlmostEqual(result["actual_quote_amount_usd"], 4.0)
         self.assertTrue(
             any("$4.00 proceeds" in line for line in result["results"])

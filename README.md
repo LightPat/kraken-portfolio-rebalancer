@@ -31,7 +31,12 @@ SDCA trades are manual and require Telegram confirmation:
   BTC (Q7 + Q8). The bot sells only free BTC on Kraken and reports how much
   more BTC must be moved from cold storage when the target exceeds the Kraken
   balance.
+- `/sdcaSet <value>` manually overrides Q4. Values greater than 1 (or with a
+  `%` suffix) are treated as percentages; values between -1 and 1 are treated
+  as decimal fractions. For example, `/sdcaSet 8.05` and `/sdcaSet 0.0805`
+  both store `0.0805`; `/sdcaSet 0` clears the change.
 
 After an SDCA buy, the bot reports the filled BTC amount for manual withdrawal
 to cold storage. `/updateCurrentAllocations` refreshes the SDCA balance cells
-and records RSPS BTC quantity in E5.
+and records RSPS BTC quantity in E5. A successful real SDCA fill clears Q4;
+dry-runs, no-ops, and trades that fail before a fill leave it unchanged.
