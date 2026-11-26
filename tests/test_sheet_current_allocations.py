@@ -2,7 +2,6 @@ import os
 import unittest
 from unittest.mock import Mock, patch
 
-from embit import bip32, networks
 from sheets import (
     clear_btc_cold_balance_cache,
     get_btc_cold_balance,
@@ -325,169 +324,79 @@ class SdcaSheetTests(unittest.TestCase):
             "Q4", [[-0.25]], value_input_option="RAW"
         )
 
-    def test_missing_trezor_public_key_means_zero_cold_btc(self):
+    def test_missing_trezor_address_means_zero_cold_btc(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(get_btc_cold_balance(), 0.0)
-        with patch.dict(os.environ, {"TREZOR_BTC_PUB_KEY": ""}, clear=False):
+        with patch.dict(os.environ, {"TREZOR_BTC_ADDRESS": ""}, clear=False):
             self.assertEqual(get_btc_cold_balance(), 0.0)
 
-    def test_xpub_derivation_uses_prefix_to_choose_address_type(self):
-        account = bip32.HDKey.from_seed(bytes(range(16))).derive("m/84h/0h/0h")
-        network = networks.NETWORKS["main"]
-        expected_prefixes = {
-            "xpub": "1",
-            "ypub": "3",
-            "zpub": "bc1q",
-        }
-
-        from sheets import _derive_trezor_receive_address
-
-        for prefix, version in (
-            ("xpub", "xpub"),
-            ("ypub", "ypub"),
-            ("zpub", "zpub"),
-        ):
-            key = account.to_public(version=network[version])
-            address = _derive_trezor_receive_address(key, 0)
-            self.assertTrue(address.startswith(expected_prefixes[prefix]))
-
-    def test_cold_balance_scans_until_gap_of_twenty_unused_addresses(self):
-        account = bip32.HDKey.from_seed(bytes(range(16))).derive("m/84h/0h/0h")
-        xpub = account.to_public(
-            version=networks.NETWORKS["main"]["zpub"]
-        ).to_base58()
-
-        def address_stats(address):
-            index = addresses.index(address)
-            return {
-                "chain_stats": {
-                    "funded_txo_sum": 1_000 if index == 1 else 0,
-                    "spent_txo_sum": 0,
-                    "tx_count": 1 if index == 1 else 0,
-                },
-                "mempool_stats": {
-                    "funded_txo_sum": 500 if index == 1 else 0,
-                    "spent_txo_sum": 0,
-                    "tx_count": 0,
-                },
-            }
-
-        from sheets import _derive_trezor_receive_address
-
-        addresses = [
-            _derive_trezor_receive_address(
-                account.to_public(version=networks.NETWORKS["main"]["zpub"]),
-                index,
-            )
-            for index in range(25)
-        ]
-        with (
-            patch.dict(os.environ, {"TREZOR_BTC_PUB_KEY": xpub}),
-            patch("sheets._fetch_mempool_address", side_effect=address_stats) as fetch,
-        ):
-            self.assertAlmostEqual(get_btc_cold_balance(), 0.000015)
-
-        self.assertEqual(fetch.call_count, 25)
-
-    def test_back_to_back_allocation_refreshes_scan_blockchain_once(self):
-        account = bip32.HDKey.from_seed(bytes(range(16))).derive("m/84h/0h/0h")
-        xpub = account.to_public(
-            version=networks.NETWORKS["main"]["zpub"]
-        ).to_base58()
-        worksheet = Mock()
-        worksheet.get_values.return_value = []
-        client = Mock()
-        client.open_by_key.return_value.worksheet.return_value = worksheet
-        portfolio = ({}, {}, {}, {}, 0.0, {"USD": 0.0, "USDC": 0.0, "USDG": 0.0})
-        unused_address = {
+    def test_cold_balance_looks_up_one_address_and_caches_result(self):
+        address = "bc1qtest"
+        response = Mock()
+        response.json.return_value = {
             "chain_stats": {
-                "funded_txo_sum": 0,
-                "spent_txo_sum": 0,
-                "tx_count": 0,
+                "funded_txo_sum": 2_000,
+                "spent_txo_sum": 500,
+                "tx_count": 1,
             },
             "mempool_stats": {
-                "funded_txo_sum": 0,
-                "spent_txo_sum": 0,
-                "tx_count": 0,
+                "funded_txo_sum": 300,
+                "spent_txo_sum": 100,
+                "tx_count": 1,
             },
         }
-
         clear_btc_cold_balance_cache()
         try:
             with (
-                patch.dict(
-                    os.environ,
-                    {
-                        "GOOGLE_DOCS_SHEET_ID": "test-sheet",
-                        "TREZOR_BTC_PUB_KEY": xpub,
-                    },
-                ),
-                patch("sheets.fetch_portfolio", return_value=portfolio),
-                patch("sheets.get_sdca_sheet_values", return_value={
-                    "cash_usd": 0.0,
-                    "change_pct": 0.1,
-                    "kraken_btc": 0.0,
-                    "cold_btc": 0.0,
-                }),
-                patch("sheets.get_sdca_cash_on_kraken", return_value=0.0),
-                patch("sheets.get_btc_usd_price", return_value=50_000.0),
-                patch("sheets.get_kraken_btc_balance", return_value=0.0),
-                patch("sheets.get_gspread_client", return_value=client),
-                patch(
-                    "sheets._fetch_mempool_address", return_value=unused_address
-                ) as fetch,
-                patch("sheets.time.monotonic", return_value=1_000.0),
+                patch.dict(os.environ, {"TREZOR_BTC_ADDRESS": address}),
+                patch("sheets.httpx.get", return_value=response) as get,
             ):
-                update_current_allocations_in_sheet()
-                update_current_allocations_in_sheet()
+                self.assertAlmostEqual(get_btc_cold_balance(), 0.000017)
+                self.assertAlmostEqual(get_btc_cold_balance(), 0.000017)
 
-            self.assertEqual(fetch.call_count, 20)
+            get.assert_called_once_with(
+                f"https://mempool.space/api/address/{address}", timeout=10.0
+            )
+            response.raise_for_status.assert_called_once()
         finally:
             clear_btc_cold_balance_cache()
 
-    def test_expired_scan_rechecks_used_addresses_then_resumes_after_highest_index(
-        self,
-    ):
-        account = bip32.HDKey.from_seed(bytes(range(16))).derive("m/84h/0h/0h")
-        public_key = account.to_public(version=networks.NETWORKS["main"]["zpub"])
-        xpub = public_key.to_base58()
-        from sheets import _derive_trezor_receive_address
-
-        addresses = {
-            _derive_trezor_receive_address(public_key, index): index
-            for index in range(25)
-        }
-
-        def address_stats(address):
-            index = addresses[address]
-            return {
-                "chain_stats": {
-                    "funded_txo_sum": 1_000 if index == 1 else 0,
-                    "spent_txo_sum": 0,
-                    "tx_count": 1 if index == 1 else 0,
-                },
-                "mempool_stats": {
-                    "funded_txo_sum": 0,
-                    "spent_txo_sum": 0,
-                    "tx_count": 0,
-                },
-            }
-
+    def test_failed_address_lookup_warns_and_returns_cached_balance_or_zero(self):
+        address = "bc1qtest"
         clear_btc_cold_balance_cache()
         try:
-            with (
-                patch.dict(os.environ, {"TREZOR_BTC_PUB_KEY": xpub}),
-                patch("sheets._fetch_mempool_address", side_effect=address_stats) as fetch,
-                patch("sheets.time.monotonic", side_effect=[0.0, 0.0, 91.0, 91.0]),
-            ):
-                self.assertAlmostEqual(get_btc_cold_balance(), 0.00001)
-                self.assertAlmostEqual(get_btc_cold_balance(), 0.00001)
+            with patch.dict(os.environ, {"TREZOR_BTC_ADDRESS": address}):
+                with (
+                    patch("sheets._fetch_mempool_address", side_effect=TimeoutError),
+                    self.assertLogs("sheets", level="WARNING") as warnings,
+                ):
+                    self.assertEqual(get_btc_cold_balance(), 0.0)
+                    self.assertIn("lookup failed", warnings.output[0])
 
-            second_scan_indices = [
-                addresses[call.args[0]] for call in fetch.call_args_list[25:]
-            ]
-            self.assertEqual(len(second_scan_indices), 21)
-            self.assertEqual(set(second_scan_indices), set(range(1, 22)))
+                with patch(
+                    "sheets._fetch_mempool_address",
+                    return_value={
+                        "chain_stats": {
+                            "funded_txo_sum": 1_000,
+                            "spent_txo_sum": 0,
+                            "tx_count": 1,
+                        },
+                        "mempool_stats": {
+                            "funded_txo_sum": 0,
+                            "spent_txo_sum": 0,
+                            "tx_count": 0,
+                        },
+                    },
+                ):
+                    self.assertEqual(get_btc_cold_balance(), 0.00001)
+
+                with (
+                    patch("sheets._fetch_mempool_address", side_effect=TimeoutError),
+                    self.assertLogs("sheets", level="WARNING"),
+                ):
+                    self.assertEqual(
+                        get_btc_cold_balance(force_refresh=True), 0.00001
+                    )
         finally:
             clear_btc_cold_balance_cache()
 
