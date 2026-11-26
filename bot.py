@@ -1,5 +1,7 @@
 import os
+import re
 import httpx
+from sheets import parse_sdca_signal_update
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -28,6 +30,20 @@ CONNECT_TIMEOUT_SECONDS = 10.0
 CRYPTO_DECIMALS = 6
 USD_DECIMALS = 2
 PRICE_DECIMALS = 4
+
+
+def detect_signal_type(text: str) -> str | None:
+    sdca_signal = re.search(r"\bSDCA\s+Signal\s+Update\b", text, re.IGNORECASE)
+    rsps_signal = re.search(
+        r"\bPortfolio\s+Signal\s+Update\b", text, re.IGNORECASE
+    )
+    if sdca_signal and rsps_signal:
+        return "ambiguous"
+    if sdca_signal:
+        return "sdca"
+    if rsps_signal:
+        return "rsps"
+    return None
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -266,12 +282,58 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def signal_update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Automatically parse any message containing a Portfolio Signal Update."""
+    """Route explicitly titled SDCA and RSPS signal updates."""
     if update.effective_user.id != ALLOWED_USER_ID:
         return
 
     text = (update.message.text or update.message.caption or "").strip()
-    if "Portfolio Signal Update" not in text or "RSPS Signal:" not in text:
+    signal_type = detect_signal_type(text)
+    if signal_type is None:
+        return
+    if signal_type == "ambiguous":
+        await update.message.reply_text(
+            "❌ Signal message contains both SDCA and Portfolio update titles; "
+            "no sheet changes were made."
+        )
+        return
+
+    if signal_type == "sdca":
+        try:
+            change_pct = parse_sdca_signal_update(text)
+        except ValueError as e:
+            await update.message.reply_text(
+                f"❌ SDCA signal parse failed: {e}. No sheet changes were made."
+            )
+            return
+
+        status_message = await update.message.reply_text(
+            "🔄 Updating SDCA Change % Today..."
+        )
+        try:
+            timeout = httpx.Timeout(
+                HTTP_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS
+            )
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    f"{FASTAPI_URL}/updateSdcaChange",
+                    json={"change_pct": change_pct},
+                    headers={"X-API-Key": REBALANCER_API_KEY},
+                )
+                resp.raise_for_status()
+        except Exception as e:
+            await status_message.edit_text(
+                f"❌ SDCA signal update failed: {type(e).__name__}: {e}"
+            )
+            return
+
+        direction = "buy" if change_pct > 0 else "sell" if change_pct < 0 else "no change"
+        await status_message.edit_text(
+            f"✅ SDCA Change % Today set to {abs(change_pct) * 100:.2f}% "
+            f"({direction})."
+        )
+        return
+
+    if "RSPS Signal:" not in text:
         return  # not a signal message
 
     status_message = await update.message.reply_text(

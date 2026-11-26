@@ -13,7 +13,10 @@ from rebalancer import (
     generate_sdca_plan,
     execute_sdca_trade,
 )
-from sheets import update_current_allocations_in_sheet
+from sheets import (
+    update_current_allocations_in_sheet,
+    update_sdca_change_in_sheet,
+)
 from kraken import cancel_open_orders
 
 API_KEY_NAME = "X-API-Key"
@@ -55,6 +58,10 @@ class PlanResponse(BaseModel):
     dry_run: bool
 
 
+class SDCAChangeRequest(BaseModel):
+    change_pct: float
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -63,6 +70,15 @@ async def health():
 @app.post("/updateCurrentAllocations", dependencies=[Depends(get_api_key)])
 async def update_current_allocations():
     return update_current_allocations_in_sheet()
+
+
+@app.post("/updateSdcaChange", dependencies=[Depends(get_api_key)])
+async def update_sdca_change(data: SDCAChangeRequest):
+    try:
+        update_sdca_change_in_sheet(data.change_pct)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "success", "change_pct": data.change_pct}
 
 
 @app.get(
