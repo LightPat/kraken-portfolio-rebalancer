@@ -181,9 +181,6 @@ class RebalancerMarginOrderTests(unittest.TestCase):
                 return_value=Mock(warnings=[], insufficient=False),
             ) as validate,
             patch(
-                "rebalancer.get_sdca_cash_on_kraken", return_value=25.0
-            ) as get_cash_on_kraken,
-            patch(
                 "rebalancer.get_sdca_sheet_values",
                 return_value={
                     "cash_usd": 0.0,
@@ -199,10 +196,42 @@ class RebalancerMarginOrderTests(unittest.TestCase):
             rebalancer.execute_trades(plan)
 
         cancel.assert_called_once_with(["ETH/USD", "ETH/USD:BTNL"])
-        get_cash_on_kraken.assert_called_once_with()
-        validate.assert_called_once_with(
-            plan, reserved_quote_balances={"USD": 25.0}
-        )
+        validate.assert_called_once_with(plan)
+
+    def test_rsps_does_not_submit_opening_trade_when_funding_is_insufficient(self):
+        trade = {
+            "symbol": "ETH/USD",
+            "asset": "ETH",
+            "action": "open_long",
+            "amount_usd": 22.0,
+            "capital_usd": 22.0,
+        }
+        warning = "⚠️ CONVERSION NEEDED: convert $22.00 USDG → USD to open long ETH/USD."
+        with (
+            patch("rebalancer.os.getenv", return_value="false"),
+            patch("rebalancer.get_kraken_exchange"),
+            patch("rebalancer.cancel_open_orders", return_value=[]),
+            patch(
+                "rebalancer.generate_rebalance_plan",
+                return_value={"plan": [trade]},
+            ),
+            patch(
+                "rebalancer.fetch_portfolio",
+                return_value=({}, {}, {}, {}, 0.0, {}),
+            ),
+            patch("rebalancer.fetch_margin_positions", return_value=[]),
+            patch(
+                "rebalancer.validate_quote_balances",
+                return_value=Mock(warnings=[warning], insufficient=True),
+            ) as validate,
+            patch("rebalancer._submit_trade_orders") as submit_orders,
+        ):
+            result = rebalancer.execute_trades([trade])
+
+        self.assertIn(warning, result)
+        self.assertTrue(any("New positions paused" in line for line in result))
+        validate.assert_called_once_with([trade])
+        submit_orders.assert_not_called()
 
 
 if __name__ == "__main__":

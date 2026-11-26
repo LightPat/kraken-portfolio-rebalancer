@@ -34,7 +34,6 @@ from kraken import (
     get_order_remaining,
     get_free_balance,
     get_btc_usd_price,
-    _stable_balances_after_reserve,
 )
 from bot import CRYPTO_DECIMALS, PRICE_DECIMALS
 
@@ -163,12 +162,6 @@ def generate_rebalance_plan(
     rsps_allocation_pct = get_rsps_allocation_pct()
     sdca_values = get_sdca_sheet_values()
     sdca_cash_on_kraken = get_sdca_cash_on_kraken()
-    stable_breakdown = _stable_balances_after_reserve(
-        dict(stable_breakdown),
-        sdca_cash_on_kraken,
-        preferred_quote="USD",
-    )
-
     if sdca_values["kraken_btc"] > 0:
         btc_price = get_btc_usd_price()
         spot_value_by_asset = dict(spot_value_by_asset)
@@ -959,7 +952,6 @@ def execute_trades(
 
     if not plan:
         return results
-    reserved_sdca_cash = {"USD": get_sdca_cash_on_kraken()}
     progress_position = 0
     progress_total = max(1, len(plan))
 
@@ -1036,7 +1028,7 @@ def execute_trades(
 
     if short_reductions:
         cover_check = validate_quote_balances(
-            short_reductions, reserved_quote_balances=reserved_sdca_cash
+            short_reductions
         )
         results.extend(cover_check.warnings)
         if cover_check.insufficient:
@@ -1131,7 +1123,7 @@ def execute_trades(
     spending_trades = short_openings + long_openings
     if spending_trades:
         opening_check = validate_quote_balances(
-            spending_trades, reserved_quote_balances=reserved_sdca_cash
+            spending_trades
         )
         results.extend(opening_check.warnings)
         if opening_check.insufficient:

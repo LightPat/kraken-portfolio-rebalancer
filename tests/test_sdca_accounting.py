@@ -56,10 +56,10 @@ class CapitalSplitTests(unittest.TestCase):
 
         self.assertEqual(plan["investable_value"], 850.0)
         self.assertEqual(plan["rsps_allocation_pct"], 0.7)
-        self.assertEqual(plan["current_stables_total"], 350.0)
+        self.assertEqual(plan["current_stables_total"], 400.0)
         update_allocations.assert_called_once_with()
 
-    def test_rebalance_plan_subtracts_q6_from_combined_stables(self):
+    def test_rebalance_plan_uses_raw_stables_and_q6_for_investable(self):
         portfolio = (
             {},
             {},
@@ -89,7 +89,7 @@ class CapitalSplitTests(unittest.TestCase):
         ):
             plan = rebalancer.generate_rebalance_plan()
 
-        self.assertEqual(plan["current_stables_total"], 22_550.0)
+        self.assertEqual(plan["current_stables_total"], 36_710.0)
         self.assertEqual(plan["investable_value"], 35_740.0)
 
 

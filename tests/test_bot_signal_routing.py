@@ -144,7 +144,7 @@ class SignalRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Execution paused", text)
         self.assertNotIn("reply_markup", status_message.edit_text.await_args.kwargs)
 
-    async def test_sdca_plan_allows_confirmation_with_conversion_warning(self):
+    async def test_sdca_plan_blocks_confirmation_when_conversion_is_needed(self):
         warning = (
             "⚠️ CONVERSION NEEDED: Convert $22.05 USDG → USD to buy BTC/USD."
         )
@@ -167,7 +167,7 @@ class SignalRoutingTests(unittest.IsolatedAsyncioTestCase):
             "cold_btc": 0.0,
             "dry_run": False,
             "quote_warnings": [warning],
-            "quote_insufficient": False,
+            "quote_insufficient": True,
         }
         response = Mock()
         response.raise_for_status = Mock()
@@ -186,8 +186,8 @@ class SignalRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         text = status_message.edit_text.await_args.args[0]
         self.assertIn(warning, text)
-        self.assertIn("Check quote availability before execution", text)
-        self.assertIn("reply_markup", status_message.edit_text.await_args.kwargs)
+        self.assertIn("Execution paused", text)
+        self.assertNotIn("reply_markup", status_message.edit_text.await_args.kwargs)
 
     async def test_sdca_execute_failure_includes_api_response_detail(self):
         query = Mock()

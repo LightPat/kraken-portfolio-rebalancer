@@ -15,7 +15,7 @@ from sheets import (
 
 
 class UpdateCurrentAllocationsTests(unittest.TestCase):
-    def test_allocation_refresh_subtracts_q6_across_stable_balances(self):
+    def test_allocation_refresh_writes_raw_stable_balances(self):
         worksheet = Mock()
         worksheet.get_values.side_effect = lambda cell_range: {
             "A8:A": [["BTC"]],
@@ -53,7 +53,7 @@ class UpdateCurrentAllocationsTests(unittest.TestCase):
             update_current_allocations_in_sheet()
 
         worksheet.update.assert_any_call(
-            "I8:I9", [[0.0], [22_550.0]], value_input_option="RAW"
+            "I8:I9", [[179.0], [36_531.0]], value_input_option="RAW"
         )
 
     def test_writes_short_used_margin_as_positive_current_allocation(self):
@@ -123,7 +123,7 @@ class UpdateCurrentAllocationsTests(unittest.TestCase):
                     "cold_btc": 0.2,
                 },
             ),
-            patch("sheets.get_sdca_cash_on_kraken", return_value=50.0),
+            patch("sheets.get_sdca_cash_on_kraken", return_value=50.0) as get_cash,
             patch("sheets.get_btc_cold_balance", return_value=0.25),
             patch("sheets.get_btc_usd_price", return_value=50_000.0),
             patch("sheets.get_kraken_btc_balance", return_value=0.5),
@@ -134,7 +134,8 @@ class UpdateCurrentAllocationsTests(unittest.TestCase):
         worksheet.update.assert_any_call(
             "E8:E8", [[22_500.0]], value_input_option="RAW"
         )
-        worksheet.update.assert_any_call("I8:I8", [[450.0]], value_input_option="RAW")
+        worksheet.update.assert_any_call("I8:I8", [[500.0]], value_input_option="RAW")
+        get_cash.assert_not_called()
         worksheet.batch_update.assert_called_once_with(
             [
                 {"range": "Q7", "values": [[0.05]]},
@@ -266,7 +267,7 @@ class SdcaSheetTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-negative"):
                 get_sdca_cash_on_kraken()
 
-    def test_allocation_refresh_subtracts_q6_not_q3_and_does_not_write_either(self):
+    def test_allocation_refresh_writes_raw_stables_without_reading_q6_or_q3(self):
         worksheet = Mock()
         worksheet.get_values.side_effect = lambda cell_range: (
             [["USD"]] if cell_range in {"A8:A", "H8:H"} else []
@@ -295,7 +296,7 @@ class SdcaSheetTests(unittest.TestCase):
                     "cold_btc": 0.0,
                 },
             ),
-            patch("sheets.get_sdca_cash_on_kraken", return_value=100.0),
+            patch("sheets.get_sdca_cash_on_kraken", return_value=100.0) as get_cash,
             patch("sheets.get_btc_cold_balance", return_value=0.0),
             patch("sheets.get_btc_usd_price", return_value=50_000.0),
             patch("sheets.get_kraken_btc_balance", return_value=0.0),
@@ -303,7 +304,8 @@ class SdcaSheetTests(unittest.TestCase):
             update_current_allocations_in_sheet()
 
         worksheet.update.assert_any_call("E8:E8", [[0.0]], value_input_option="RAW")
-        worksheet.update.assert_any_call("I8:I8", [[300.0]], value_input_option="RAW")
+        worksheet.update.assert_any_call("I8:I8", [[400.0]], value_input_option="RAW")
+        get_cash.assert_not_called()
         for call in worksheet.update.call_args_list:
             self.assertNotIn(call.args[0], {"Q3", "Q6"})
         for batch in worksheet.batch_update.call_args_list:

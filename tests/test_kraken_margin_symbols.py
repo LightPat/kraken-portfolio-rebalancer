@@ -108,16 +108,9 @@ class QuoteCurrencyTests(unittest.TestCase):
         self.assertEqual(result.warnings, [])
         self.assertFalse(result.insufficient)
 
-    def test_quote_balance_validation_reserves_short_proceeds_for_new_shorts(self):
+    def test_quote_balance_validation_checks_raw_stables_for_new_shorts(self):
         exchange = Mock()
-        exchange.fetch_balance.return_value = {"free": {"USD": 500.0}}
-        position = {
-            "symbol": "ETH/USD:BTNL",
-            "side": "short",
-            "entry_price": 100.0,
-            "size_base": 2.0,
-            "used_margin_usd": 100.0,
-        }
+        exchange.fetch_balance.return_value = {"free": {"USD": 300.0}}
         trade = {
             "symbol": "BTC/USD:BTNL",
             "quote": "USD",
@@ -127,46 +120,38 @@ class QuoteCurrencyTests(unittest.TestCase):
             "capital_usd": 400.0,
         }
 
-        with (
-            patch("kraken.get_kraken_exchange", return_value=exchange),
-            patch("kraken.fetch_margin_positions", return_value=[position]),
-        ):
+        with patch("kraken.get_kraken_exchange", return_value=exchange):
             result = kraken.validate_quote_balances([trade])
 
         self.assertEqual(len(result.warnings), 1)
         self.assertTrue(result.insufficient)
         self.assertIn("requires $100.00 more USD", result.warnings[0])
 
-    def test_quote_balance_validation_credits_spot_reductions_to_stable_balance(self):
+    def test_quote_balance_validation_does_not_count_planned_reduction_proceeds(self):
         exchange = Mock()
         exchange.fetch_balance.return_value = {"free": {"USD": 500.0}}
         reduction = {
-            "symbol": "ETH/USD:BTNL",
-            "quote": "USD:BTNL",
+            "symbol": "ETH/USD",
             "action": "reduce_long",
             "amount_usd": 100.0,
             "margin": False,
         }
-        cover = {
-            "symbol": "ETH/USD:BTNL",
-            "quote": "USD:BTNL",
-            "asset": "ETH",
-            "action": "cover_short",
-            "amount_usd": 600.0,
+        opening = {
+            "symbol": "BTC/USD",
+            "asset": "BTC",
+            "action": "open_long",
+            "amount_usd": 550.0,
         }
 
-        with (
-            patch("kraken.get_kraken_exchange", return_value=exchange),
-            patch("kraken.fetch_margin_positions", return_value=[]),
-        ):
-            result = kraken.validate_quote_balances([reduction, cover])
+        with patch("kraken.get_kraken_exchange", return_value=exchange):
+            result = kraken.validate_quote_balances([reduction, opening])
 
-        self.assertEqual(result.warnings, [])
-        self.assertFalse(result.insufficient)
+        self.assertTrue(result.insufficient)
+        self.assertIn("requires $50.00 more USD", result.warnings[0])
 
-    def test_quote_balance_validation_preserves_sdca_cash(self):
+    def test_quote_balance_validation_does_not_subtract_q6(self):
         exchange = Mock()
-        exchange.fetch_balance.return_value = {"free": {"USD": 500.0}}
+        exchange.fetch_balance.return_value = {"free": {"USD": 300.0}}
         trade = {
             "symbol": "BTC/USD",
             "asset": "BTC",
@@ -175,28 +160,16 @@ class QuoteCurrencyTests(unittest.TestCase):
             "capital_usd": 300.0,
         }
 
-        with (
-            patch("kraken.get_kraken_exchange", return_value=exchange),
-            patch("kraken.fetch_margin_positions", return_value=[]),
-        ):
-            result = kraken.validate_quote_balances(
-                [trade], reserved_quote_balances={"USD": 250.0}
-            )
+        with patch("kraken.get_kraken_exchange", return_value=exchange):
+            result = kraken.validate_quote_balances([trade])
 
-        self.assertEqual(len(result.warnings), 1)
-        self.assertTrue(result.insufficient)
-        self.assertIn("requires $50.00 more USD", result.warnings[0])
+        self.assertEqual(result.warnings, [])
+        self.assertFalse(result.insufficient)
 
-    def test_quote_balance_validation_uses_combined_stables_after_q6(self):
+    def test_quote_balance_validation_blocks_when_quote_conversion_is_needed(self):
         exchange = Mock()
         exchange.fetch_balance.return_value = {
-            "free": {"USD": 179.0, "USDC": 0.0, "USDG": 36_000.0}
-        }
-        short_position = {
-            "symbol": "BTC/USD:BTNL",
-            "side": "short",
-            "entry_price": 1_000.0,
-            "size_base": 1.0,
+            "free": {"USD": 0.0, "USDC": 0.0, "USDG": 36_531.0}
         }
         trade = {
             "symbol": "ETH/USD:BTNL",
@@ -207,25 +180,13 @@ class QuoteCurrencyTests(unittest.TestCase):
             "capital_usd": 22.05,
         }
 
-        with (
-            patch("kraken.get_kraken_exchange", return_value=exchange),
-            patch("kraken.fetch_margin_positions", return_value=[short_position]),
-        ):
-            result = kraken.validate_quote_balances(
-                [trade], reserved_quote_balances={"USD": 14_160.0}
-            )
+        with patch("kraken.get_kraken_exchange", return_value=exchange):
+            result = kraken.validate_quote_balances([trade])
 
-        self.assertFalse(result.insufficient)
+        self.assertTrue(result.insufficient)
         self.assertEqual(len(result.warnings), 1)
         self.assertIn(
-            "Convert $22.05 USDG → USD to open short ETH/USD",
-            result.warnings[0],
-        )
-        self.assertIn(
-            "Total stables after Q6 reserve: $22,019.00", result.warnings[0]
-        )
-        self.assertIn(
-            "Total available after existing short-proceeds reserve: $21,019.00",
+            "convert $22.05 USDG → USD",
             result.warnings[0],
         )
 

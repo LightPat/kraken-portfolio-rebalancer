@@ -13,7 +13,6 @@ from kraken import (
     fetch_portfolio,
     get_btc_usd_price,
     get_kraken_btc_balance,
-    _stable_balances_after_reserve,
 )
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -552,12 +551,6 @@ def update_current_allocations_in_sheet(
         stable_breakdown,
     ) = fetch_portfolio()
     sdca_values = get_sdca_sheet_values()
-    sdca_cash_on_kraken = get_sdca_cash_on_kraken()
-    stable_breakdown = _stable_balances_after_reserve(
-        dict(stable_breakdown),
-        sdca_cash_on_kraken,
-        preferred_quote="USD",
-    )
     cold_btc = get_btc_cold_balance(force_refresh=force_cold_balance_refresh)
     btc_price = get_btc_usd_price()
     sdca_total_btc = sdca_values["kraken_btc"] + sdca_values["cold_btc"]

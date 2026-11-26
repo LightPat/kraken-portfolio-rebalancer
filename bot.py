@@ -281,8 +281,8 @@ async def sdca_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     if plan.get("quote_insufficient", False):
         description += (
-            "\n⏸️ Execution paused: total available stablecoins do not cover "
-            "this trade after reserves."
+            "\n⏸️ Execution paused: available stablecoins do not cover "
+            "the required quote balance."
         )
         await status_message.edit_text(description)
         return
