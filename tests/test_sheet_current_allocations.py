@@ -119,6 +119,38 @@ class SdcaSheetTests(unittest.TestCase):
         self.assertEqual(values["change_pct"], -0.25)
         self.assertEqual(values["cash_usd"], 125.5)
 
+    def test_sdca_sheet_reader_converts_formatted_percentage_to_fraction(self):
+        worksheet = Mock()
+        worksheet.acell.side_effect = lambda cell: Mock(
+            value={
+                "Q3": "125.50",
+                "Q4": "8.656%",
+                "Q7": "0.1",
+                "Q8": "0.2",
+            }[cell]
+        )
+
+        with patch("sheets._get_signals_worksheet", return_value=worksheet):
+            values = get_sdca_sheet_values()
+
+        self.assertAlmostEqual(values["change_pct"], 0.08656)
+
+    def test_sdca_sheet_reader_preserves_sign_on_formatted_percentage(self):
+        worksheet = Mock()
+        worksheet.acell.side_effect = lambda cell: Mock(
+            value={
+                "Q3": "125.50",
+                "Q4": "-8.656%",
+                "Q7": "0.1",
+                "Q8": "0.2",
+            }[cell]
+        )
+
+        with patch("sheets._get_signals_worksheet", return_value=worksheet):
+            values = get_sdca_sheet_values()
+
+        self.assertAlmostEqual(values["change_pct"], -0.08656)
+
     def test_cash_update_writes_only_q3(self):
         worksheet = Mock()
         client = Mock()
