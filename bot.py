@@ -312,7 +312,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "sdca_confirm":
-        await query.edit_message_text("🔄 SDCA trade in progress...")
+        await query.edit_message_text("🔄 Refreshing allocations for the SDCA plan…")
         try:
             timeout = httpx.Timeout(
                 EXECUTE_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS
@@ -320,6 +320,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(
                     f"{FASTAPI_URL}/sdca/execute",
+                    json={
+                        "chat_id": query.message.chat_id,
+                        "message_id": query.message.message_id,
+                    },
                     headers={"X-API-Key": REBALANCER_API_KEY},
                 )
                 resp.raise_for_status()
@@ -327,10 +331,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except httpx.HTTPStatusError as e:
             response_text = e.response.text.strip()
             error_detail = response_text or str(e)
-            await query.edit_message_text(
-                f"❌ SDCA execute failed: HTTP {e.response.status_code}: "
-                f"{error_detail}"
-            )
+            if (
+                e.response.headers.get("X-Telegram-Progress-Reported", "").lower()
+                != "true"
+            ):
+                await query.edit_message_text(
+                    f"❌ SDCA execute failed: HTTP {e.response.status_code}: "
+                    f"{error_detail}"
+                )
             return
         except Exception as e:
             await query.edit_message_text(
@@ -339,6 +347,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         result_text = "\n".join(result.get("results", ["No details returned"]))
+        if result.get("progress_reported"):
+            return
         if result.get("status") == "blocked":
             await query.edit_message_text(f"⏸️ SDCA trade paused.\n\n{result_text}")
             return
@@ -346,7 +356,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "confirm":
-        await query.edit_message_text("🔄 Rebalance in progress...")
+        await query.edit_message_text("🔄 Refreshing allocations…")
         try:
             timeout = httpx.Timeout(
                 EXECUTE_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS
@@ -354,14 +364,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(
                     f"{FASTAPI_URL}/rebalance/execute",
+                    json={
+                        "chat_id": query.message.chat_id,
+                        "message_id": query.message.message_id,
+                    },
                     headers={"X-API-Key": REBALANCER_API_KEY},
                 )
                 resp.raise_for_status()
                 result = resp.json()
+        except httpx.HTTPStatusError as e:
+            if (
+                e.response.headers.get("X-Telegram-Progress-Reported", "").lower()
+                != "true"
+            ):
+                await query.edit_message_text(
+                    f"❌ Execute failed: HTTP {e.response.status_code}: "
+                    f"{e.response.text.strip() or str(e)}"
+                )
+            return
         except Exception as e:
             await query.edit_message_text(f"❌ Execute failed: {type(e).__name__}: {e}")
             return
 
+        if result.get("progress_reported"):
+            return
         result_text = "\n".join(result.get("results", ["No details returned"]))
         await query.edit_message_text(f"🚀 Rebalance executed!\n\n{result_text}")
 

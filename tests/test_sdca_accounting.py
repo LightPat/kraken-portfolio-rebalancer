@@ -1,6 +1,6 @@
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 with patch.dict(
     os.environ,
@@ -283,9 +283,10 @@ class SdcaCashAccountingTests(unittest.TestCase):
             patch("rebalancer.update_current_allocations_in_sheet") as update_allocations,
             patch("rebalancer.update_sdca_change_in_sheet") as clear_change,
             patch("rebalancer.get_sdca_sheet_values") as read_sdca,
+            patch("rebalancer.report_progress") as report,
         ):
             get_exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
-            result = rebalancer.execute_sdca_trade()
+            result = rebalancer.execute_sdca_trade(progress=Mock())
 
         read_sdca.assert_not_called()
         update_allocations.assert_called_once_with(
@@ -296,6 +297,49 @@ class SdcaCashAccountingTests(unittest.TestCase):
         self.assertTrue(
             any("Change % Today cleared." in line for line in result["results"])
         )
+        progress_texts = [call.args[1] for call in report.call_args_list]
+        self.assertTrue(any("placing post-only order" in text for text in progress_texts))
+        self.assertTrue(
+            any("post-only order placed; waiting for fill" in text for text in progress_texts)
+        )
+        self.assertTrue(any("filled." in text for text in progress_texts))
+        self.assertIn("Updating sheet…", progress_texts)
+        self.assertIn("Sheet updated; Change % Today cleared.", progress_texts)
+
+    def test_progress_helper_swallows_telegram_edit_failure(self):
+        with (
+            patch.dict(
+                os.environ,
+                {rebalancer.TELEGRAM_TOKEN_ENV: "test-token"},
+            ),
+            patch(
+                "rebalancer.httpx.post",
+                side_effect=RuntimeError("Telegram API unavailable"),
+            ),
+        ):
+            reporter = rebalancer.TelegramProgressReporter(123, 456)
+            reporter.last_edit_at -= 3
+            with self.assertLogs("rebalancer", level="WARNING"):
+                self.assertFalse(
+                    rebalancer.report_progress(reporter, "Progress update")
+                )
+
+    def test_progress_updates_are_rate_limited(self):
+        response = Mock()
+        response.json.return_value = {"ok": True}
+        with (
+            patch.dict(
+                os.environ,
+                {rebalancer.TELEGRAM_TOKEN_ENV: "test-token"},
+            ),
+            patch("rebalancer.httpx.post", return_value=response) as post,
+        ):
+            reporter = rebalancer.TelegramProgressReporter(123, 456)
+            reporter.last_edit_at -= 3
+            self.assertTrue(rebalancer.report_progress(reporter, "First update"))
+            self.assertFalse(rebalancer.report_progress(reporter, "Second update"))
+
+        post.assert_called_once()
 
     def test_failed_trade_does_not_clear_change_pct(self):
         plan = {

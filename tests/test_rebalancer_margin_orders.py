@@ -28,12 +28,21 @@ class RebalancerMarginOrderTests(unittest.TestCase):
                 "rebalancer.create_post_only_limit_order",
                 return_value={"id": "order-1"},
             ) as create_order,
+            patch("rebalancer.report_progress") as report,
         ):
-            orders = rebalancer._submit_trade_orders(exchange, [trade], False, [])
+            orders = rebalancer._submit_trade_orders(
+                exchange, [trade], False, [], progress=Mock()
+            )
 
         self.assertEqual(orders[0]["symbol"], "ETH/USD:BTNL")
         create_order.assert_called_once_with(
             "ETH/USD", "buy", 2, 99, margin=True, reduce_only=True
+        )
+        messages = [call.args[1] for call in report.call_args_list]
+        self.assertTrue(any("Closing ETH short (1/1)" in text for text in messages))
+        self.assertTrue(any("placing post-only order" in text for text in messages))
+        self.assertTrue(
+            any("post-only order placed; waiting for fill" in text for text in messages)
         )
 
     def test_failed_refresh_falls_back_to_original_amount_on_margin_symbol(self):
@@ -54,14 +63,52 @@ class RebalancerMarginOrderTests(unittest.TestCase):
             patch(
                 "rebalancer.create_market_order", return_value={"id": "market-1"}
             ) as create_market,
+            patch("rebalancer.report_progress") as report,
         ):
-            rebalancer._cancel_and_market_fallback([order], [])
+            rebalancer._cancel_and_market_fallback(
+                [order], [], progress=Mock()
+            )
 
         fetch_order.assert_called_once_with("order-1", "ETH/USD:BTNL")
         cancel_order.assert_called_once_with("order-1")
         create_market.assert_called_once_with(
             "ETH/USD:BTNL", "buy", 2, margin=True, reduce_only=True
         )
+        messages = [call.args[1] for call in report.call_args_list]
+        self.assertTrue(any("falling back to market" in text for text in messages))
+        self.assertTrue(any("market fallback order placed" in text for text in messages))
+
+    def test_cancel_progress_includes_the_active_trade(self):
+        order = {
+            "order_id": "order-1",
+            "symbol": "ETH/USD:BTNL",
+            "side": "buy",
+            "amount_base": 2,
+            "asset": "ETH",
+            "action": "cover_short",
+            "margin": True,
+            "reduce_only": True,
+            "progress_label": "Closing ETH short (1/1)",
+        }
+        results = []
+        with (
+            patch("rebalancer.is_rebalance_cancel_requested", return_value=True),
+            patch("rebalancer.report_progress") as report,
+        ):
+            fallback_orders = rebalancer._wait_for_order_completion(
+                [order],
+                results,
+                timeout_seconds=10,
+                poll_interval_seconds=0,
+                progress=Mock(),
+            )
+
+        self.assertEqual(fallback_orders, [order])
+        self.assertIn(
+            "⏹️ Cancellation received during Closing ETH short (1/1).",
+            results,
+        )
+        self.assertIn("Closing ETH short (1/1)", report.call_args.args[1])
 
     def test_terminal_order_needing_fallback_is_returned(self):
         order = {

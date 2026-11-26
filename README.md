@@ -26,6 +26,8 @@ ypub, or zpub. The bot derives receive addresses using the prefix-appropriate
 BIP44/49/84 format and sums confirmed plus unconfirmed balances from
 mempool.space, stopping after 20 consecutive unused addresses. An unset or
 empty key is treated as a zero cold-wallet balance.
+For live execution progress, make the bot token available to the API service as
+`TELEGRAM_KRAKEN_PORTFOLIO_REBALANCER_BOT_HTTP_TOKEN`.
 
 SDCA trades are manual and require Telegram confirmation:
 

@@ -149,6 +149,8 @@ class SignalRoutingTests(unittest.IsolatedAsyncioTestCase):
         query.data = "sdca_confirm"
         query.answer = AsyncMock()
         query.edit_message_text = AsyncMock()
+        query.message.chat_id = 123
+        query.message.message_id = 456
         update = Mock()
         update.callback_query = query
 
@@ -169,10 +171,54 @@ class SignalRoutingTests(unittest.IsolatedAsyncioTestCase):
         ):
             await bot.button_callback(update, Mock())
 
+        client.post.assert_awaited_once_with(
+            "http://localhost/sdca/execute",
+            json={"chat_id": 123, "message_id": 456},
+            headers={"X-API-Key": bot.REBALANCER_API_KEY},
+        )
         query.edit_message_text.assert_awaited()
         self.assertIn(
             "SDCA order amount is below Kraken's BTC precision",
             query.edit_message_text.await_args_list[-1].args[0],
+        )
+
+    async def test_rsps_execute_passes_message_identifiers_and_uses_reported_final(self):
+        query = Mock()
+        query.from_user.id = 1
+        query.data = "confirm"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        query.message.chat_id = 123
+        query.message.message_id = 456
+        update = Mock()
+        update.callback_query = query
+
+        response = Mock()
+        response.raise_for_status = Mock()
+        response.json.return_value = {
+            "results": ["Filled BTC buy"],
+            "progress_reported": True,
+        }
+        client = Mock()
+        client.post = AsyncMock(return_value=response)
+        async_client = Mock()
+        async_client.__aenter__ = AsyncMock(return_value=client)
+        async_client.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("bot.ALLOWED_USER_ID", 1),
+            patch("bot.REBALANCER_API_KEY", "test-key"),
+            patch("bot.httpx.AsyncClient", return_value=async_client),
+        ):
+            await bot.button_callback(update, Mock())
+
+        client.post.assert_awaited_once_with(
+            "http://localhost/rebalance/execute",
+            json={"chat_id": 123, "message_id": 456},
+            headers={"X-API-Key": "test-key"},
+        )
+        query.edit_message_text.assert_awaited_once_with(
+            "🔄 Refreshing allocations…"
         )
 
     async def test_mixed_titles_reply_without_calling_api(self):
