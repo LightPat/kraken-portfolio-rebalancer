@@ -129,7 +129,10 @@ class RebalancerMarginOrderTests(unittest.TestCase):
             patch("rebalancer.os.getenv", return_value="false"),
             patch("rebalancer.get_kraken_exchange"),
             patch("rebalancer.cancel_open_orders", return_value=[]) as cancel,
-            patch("rebalancer.validate_quote_balances", return_value=[]),
+            patch("rebalancer.validate_quote_balances", return_value=[]) as validate,
+            patch(
+                "rebalancer.get_sdca_cash_on_kraken", return_value=25.0
+            ) as get_cash_on_kraken,
             patch(
                 "rebalancer.get_sdca_sheet_values",
                 return_value={
@@ -146,6 +149,10 @@ class RebalancerMarginOrderTests(unittest.TestCase):
             rebalancer.execute_trades(plan)
 
         cancel.assert_called_once_with(["ETH/USD", "ETH/USD:BTNL"])
+        get_cash_on_kraken.assert_called_once_with()
+        validate.assert_called_once_with(
+            plan, reserved_quote_balances={"USD": 25.0}
+        )
 
 
 if __name__ == "__main__":
