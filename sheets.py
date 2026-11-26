@@ -207,6 +207,16 @@ def get_rsps_allocation_pct() -> float:
     return _parse_fraction_cell(value, "N2")
 
 
+def get_sdca_cash_on_kraken() -> float:
+    """Return the manually tracked SDCA cash held on Kraken from Signals!Q6."""
+    cash_on_kraken = _parse_sheet_numeric_value(
+        _get_signals_worksheet().acell("Q6").value, "Q6"
+    )
+    if not math.isfinite(cash_on_kraken) or cash_on_kraken < 0:
+        raise ValueError("SDCA cash on Kraken in Q6 must be finite and non-negative")
+    return cash_on_kraken
+
+
 def get_sdca_sheet_values() -> dict[str, float]:
     """Read SDCA's cash, signed daily change fraction, and tracked BTC balances."""
     worksheet = _get_signals_worksheet()
@@ -472,11 +482,6 @@ def get_btc_cold_balance(force_refresh: bool = False) -> float:
         return balance
 
 
-def update_sdca_cash_in_sheet(cash_usd: float) -> None:
-    """Update only SDCA's USD cash pool after a confirmed trade fill."""
-    _get_signals_worksheet().update("Q3", [[cash_usd]], value_input_option="RAW")
-
-
 def update_current_allocations_in_sheet(
     sdca_btc_adjustment: float = 0.0,
     force_cold_balance_refresh: bool = False,
@@ -506,10 +511,11 @@ def update_current_allocations_in_sheet(
         stable_breakdown,
     ) = fetch_portfolio()
     sdca_values = get_sdca_sheet_values()
+    sdca_cash_on_kraken = get_sdca_cash_on_kraken()
     stable_breakdown = dict(stable_breakdown)
     stable_breakdown["USD"] = max(
         0.0,
-        stable_breakdown.get("USD", 0.0) - max(0.0, sdca_values["cash_usd"]),
+        stable_breakdown.get("USD", 0.0) - sdca_cash_on_kraken,
     )
     cold_btc = get_btc_cold_balance(force_refresh=force_cold_balance_refresh)
     btc_price = get_btc_usd_price()

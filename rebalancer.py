@@ -7,9 +7,9 @@ from sheets import (
     get_target_allocations,
     get_desired_cash_reserve,
     get_rsps_allocation_pct,
+    get_sdca_cash_on_kraken,
     get_sdca_sheet_values,
     update_current_allocations_in_sheet,
-    update_sdca_cash_in_sheet,
     update_sdca_change_in_sheet,
 )
 from kraken import (
@@ -77,10 +77,11 @@ def generate_rebalance_plan() -> Dict[str, Any]:
     desired_reserve = get_desired_cash_reserve()
     rsps_allocation_pct = get_rsps_allocation_pct()
     sdca_values = get_sdca_sheet_values()
+    sdca_cash_on_kraken = get_sdca_cash_on_kraken()
     stable_breakdown = dict(stable_breakdown)
     stable_breakdown["USD"] = max(
         0.0,
-        stable_breakdown.get("USD", 0.0) - max(0.0, sdca_values["cash_usd"]),
+        stable_breakdown.get("USD", 0.0) - sdca_cash_on_kraken,
     )
 
     if sdca_values["kraken_btc"] > 0:
@@ -93,7 +94,9 @@ def generate_rebalance_plan() -> Dict[str, Any]:
         )
 
     investable_value = calculate_rsps_investable_value(
-        total_value, rsps_allocation_pct, desired_reserve
+        total_value,
+        desired_reserve,
+        sdca_cash_on_kraken,
     )
     closing_plan: List[Dict] = []
     opening_plan: List[Dict] = []
@@ -300,30 +303,26 @@ def generate_rebalance_plan() -> Dict[str, Any]:
 
 
 def calculate_rsps_investable_value(
-    total_equity: float, rsps_allocation_pct: float, desired_reserve: float
+    total_equity: float,
+    desired_reserve: float,
+    sdca_cash_on_kraken: float,
 ) -> float:
-    """Calculate RSPS-only capital, matching Signals!B2."""
+    """Calculate RSPS investable capital as Signals!B2: E2 - I3 - Q6."""
     if not all(
         math.isfinite(value)
-        for value in (total_equity, rsps_allocation_pct, desired_reserve)
+        for value in (
+            total_equity,
+            desired_reserve,
+            sdca_cash_on_kraken,
+        )
     ):
         raise ValueError("RSPS capital inputs must be finite numbers")
-    if not 0 <= rsps_allocation_pct <= 1 or desired_reserve < 0:
-        raise ValueError("RSPS allocation must be 0-1 and reserve non-negative")
-    return max(0.0, total_equity * rsps_allocation_pct - desired_reserve)
-
-
-def calculate_sdca_cash_balance(
-    current_cash_usd: float, action: str, actual_quote_amount_usd: float
-) -> float:
-    """Apply a confirmed SDCA fill to its isolated USD pool."""
-    if action not in {"buy", "sell"}:
-        raise ValueError(f"Unsupported SDCA action: {action}")
-    if actual_quote_amount_usd < 0:
-        raise ValueError("Actual SDCA quote amount must not be negative")
-    if action == "buy":
-        return current_cash_usd - actual_quote_amount_usd
-    return current_cash_usd + actual_quote_amount_usd
+    if desired_reserve < 0 or sdca_cash_on_kraken < 0:
+        raise ValueError("RSPS reserve and SDCA Kraken cash must be non-negative")
+    return max(
+        0.0,
+        total_equity - desired_reserve - sdca_cash_on_kraken,
+    )
 
 
 def generate_sdca_plan() -> Dict:
@@ -563,11 +562,6 @@ def execute_sdca_trade() -> Dict[str, Any]:
     if actual_quote_amount <= 0 or btc_delta == 0:
         raise RuntimeError("Kraken reported no completed SDCA BTC trade")
 
-    sdca = get_sdca_sheet_values()
-    cash_usd = calculate_sdca_cash_balance(
-        sdca["cash_usd"], action, actual_quote_amount
-    )
-    update_sdca_cash_in_sheet(cash_usd)
     update_current_allocations_in_sheet(
         sdca_btc_adjustment=btc_delta, force_cold_balance_refresh=True
     )
@@ -772,7 +766,7 @@ def execute_trades(plan: List[Dict]):
 
     if not plan:
         return results
-    reserved_sdca_cash = {"USD": get_sdca_sheet_values()["cash_usd"]}
+    reserved_sdca_cash = {"USD": get_sdca_cash_on_kraken()}
 
     if not dry_run:
         try:

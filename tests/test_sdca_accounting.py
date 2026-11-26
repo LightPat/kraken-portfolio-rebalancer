@@ -10,19 +10,19 @@ with patch.dict(
 
 
 class CapitalSplitTests(unittest.TestCase):
-    def test_rsps_investable_value_uses_only_its_split_less_reserve(self):
+    def test_rsps_investable_value_matches_sheet_formula_without_split(self):
         self.assertEqual(
-            rebalancer.calculate_rsps_investable_value(10_000, 0.7, 500),
-            6_500,
+            rebalancer.calculate_rsps_investable_value(10_000, 500, 300),
+            9_200,
         )
 
     def test_rsps_investable_value_never_goes_below_zero(self):
         self.assertEqual(
-            rebalancer.calculate_rsps_investable_value(1_000, 0.2, 500),
+            rebalancer.calculate_rsps_investable_value(1_000, 800, 300),
             0,
         )
 
-    def test_rebalance_plan_applies_sheet_split_and_rsps_reserve(self):
+    def test_rebalance_plan_matches_formula_and_keeps_split_for_display(self):
         portfolio = (
             {},
             {},
@@ -41,6 +41,7 @@ class CapitalSplitTests(unittest.TestCase):
             patch("rebalancer.fetch_margin_positions", return_value=[]),
             patch("rebalancer.get_desired_cash_reserve", return_value=100.0),
             patch("rebalancer.get_rsps_allocation_pct", return_value=0.7),
+            patch("rebalancer.get_sdca_cash_on_kraken", return_value=50.0),
             patch(
                 "rebalancer.get_sdca_sheet_values",
                 return_value={
@@ -53,7 +54,9 @@ class CapitalSplitTests(unittest.TestCase):
         ):
             plan = rebalancer.generate_rebalance_plan()
 
-        self.assertEqual(plan["investable_value"], 600.0)
+        self.assertEqual(plan["investable_value"], 850.0)
+        self.assertEqual(plan["rsps_allocation_pct"], 0.7)
+        self.assertEqual(plan["current_stables_total"], 350.0)
         update_allocations.assert_called_once_with()
 
 
@@ -250,19 +253,7 @@ class SdcaCashAccountingTests(unittest.TestCase):
         clear_change.assert_not_called()
         self.assertIn("nothing to do", result["results"][0])
 
-    def test_buy_subtracts_actual_spend_from_sdca_cash(self):
-        self.assertAlmostEqual(
-            rebalancer.calculate_sdca_cash_balance(100, "buy", 8.656),
-            91.344,
-        )
-
-    def test_sell_adds_actual_proceeds_to_sdca_cash(self):
-        self.assertAlmostEqual(
-            rebalancer.calculate_sdca_cash_balance(91.344, "sell", 20),
-            111.344,
-        )
-
-    def test_buy_updates_cash_from_filled_order_cost_and_fee(self):
+    def test_buy_records_fill_and_clears_q4_without_reading_q3(self):
         plan = {
             "action": "buy",
             "symbol": "BTC/USD",
@@ -289,23 +280,14 @@ class SdcaCashAccountingTests(unittest.TestCase):
             patch("rebalancer.get_safe_post_only_price", return_value=100.0),
             patch("rebalancer.create_post_only_limit_order", return_value=order),
             patch("rebalancer.fetch_order", return_value=order),
-            patch(
-                "rebalancer.get_sdca_sheet_values",
-                return_value={
-                    "cash_usd": 100.0,
-                    "change_pct": 0.1,
-                    "kraken_btc": 0.05,
-                    "cold_btc": 0.2,
-                },
-            ),
-            patch("rebalancer.update_sdca_cash_in_sheet") as update_cash,
             patch("rebalancer.update_current_allocations_in_sheet") as update_allocations,
             patch("rebalancer.update_sdca_change_in_sheet") as clear_change,
+            patch("rebalancer.get_sdca_sheet_values") as read_sdca,
         ):
             get_exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
             result = rebalancer.execute_sdca_trade()
 
-        update_cash.assert_called_once_with(89.9)
+        read_sdca.assert_not_called()
         update_allocations.assert_called_once_with(
             sdca_btc_adjustment=0.1, force_cold_balance_refresh=True
         )
@@ -361,23 +343,14 @@ class SdcaCashAccountingTests(unittest.TestCase):
             patch("rebalancer.get_safe_post_only_price", return_value=100.0),
             patch("rebalancer.create_post_only_limit_order", return_value=order),
             patch("rebalancer.fetch_order", return_value=order),
-            patch(
-                "rebalancer.get_sdca_sheet_values",
-                return_value={
-                    "cash_usd": 100.0,
-                    "change_pct": -0.5,
-                    "kraken_btc": 0.1,
-                    "cold_btc": 0.2,
-                },
-            ),
-            patch("rebalancer.update_sdca_cash_in_sheet") as update_cash,
             patch("rebalancer.update_current_allocations_in_sheet") as update_allocations,
             patch("rebalancer.update_sdca_change_in_sheet") as clear_change,
+            patch("rebalancer.get_sdca_sheet_values") as read_sdca,
         ):
             get_exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
             result = rebalancer.execute_sdca_trade()
 
-        update_cash.assert_called_once_with(104.0)
+        read_sdca.assert_not_called()
         update_allocations.assert_called_once_with(
             sdca_btc_adjustment=-0.04, force_cold_balance_refresh=True
         )

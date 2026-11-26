@@ -6,9 +6,9 @@ from embit import bip32, networks
 from sheets import (
     clear_btc_cold_balance_cache,
     get_btc_cold_balance,
+    get_sdca_cash_on_kraken,
     get_sdca_sheet_values,
     update_current_allocations_in_sheet,
-    update_sdca_cash_in_sheet,
     update_sdca_change_in_sheet,
 )
 
@@ -42,6 +42,7 @@ class UpdateCurrentAllocationsTests(unittest.TestCase):
                     "cold_btc": 0.0,
                 },
             ),
+            patch("sheets.get_sdca_cash_on_kraken", return_value=0.0),
             patch("sheets.get_btc_cold_balance", return_value=0.0),
             patch("sheets.get_btc_usd_price", return_value=50_000.0),
             patch("sheets.get_kraken_btc_balance", return_value=0.0),
@@ -80,6 +81,7 @@ class UpdateCurrentAllocationsTests(unittest.TestCase):
                     "cold_btc": 0.2,
                 },
             ),
+            patch("sheets.get_sdca_cash_on_kraken", return_value=50.0),
             patch("sheets.get_btc_cold_balance", return_value=0.25),
             patch("sheets.get_btc_usd_price", return_value=50_000.0),
             patch("sheets.get_kraken_btc_balance", return_value=0.5),
@@ -90,7 +92,7 @@ class UpdateCurrentAllocationsTests(unittest.TestCase):
         worksheet.update.assert_any_call(
             "E8:E8", [[22_500.0]], value_input_option="RAW"
         )
-        worksheet.update.assert_any_call("I8:I8", [[400.0]], value_input_option="RAW")
+        worksheet.update.assert_any_call("I8:I8", [[450.0]], value_input_option="RAW")
         worksheet.batch_update.assert_called_once_with(
             [
                 {"range": "Q7", "values": [[0.05]]},
@@ -151,20 +153,72 @@ class SdcaSheetTests(unittest.TestCase):
 
         self.assertAlmostEqual(values["change_pct"], -0.08656)
 
-    def test_cash_update_writes_only_q3(self):
+    def test_sdca_cash_on_kraken_reader_treats_empty_cell_as_zero(self):
         worksheet = Mock()
+        worksheet.acell.return_value.value = ""
+        with patch("sheets._get_signals_worksheet", return_value=worksheet):
+            self.assertEqual(get_sdca_cash_on_kraken(), 0.0)
+
+    def test_sdca_cash_on_kraken_reader_returns_nonnegative_amount(self):
+        worksheet = Mock()
+        worksheet.acell.return_value.value = "$125.50"
+        with patch("sheets._get_signals_worksheet", return_value=worksheet):
+            self.assertEqual(get_sdca_cash_on_kraken(), 125.5)
+
+    def test_sdca_cash_on_kraken_reader_rejects_negative_amount(self):
+        worksheet = Mock()
+        worksheet.acell.return_value.value = "-1"
+        with patch("sheets._get_signals_worksheet", return_value=worksheet):
+            with self.assertRaisesRegex(ValueError, "non-negative"):
+                get_sdca_cash_on_kraken()
+
+    def test_allocation_refresh_subtracts_q6_not_q3_and_does_not_write_either(self):
+        worksheet = Mock()
+        worksheet.get_values.side_effect = lambda cell_range: (
+            [["USD"]] if cell_range in {"A8:A", "H8:H"} else []
+        )
         client = Mock()
         client.open_by_key.return_value.worksheet.return_value = worksheet
+        portfolio = (
+            {},
+            {},
+            {},
+            {},
+            1_000.0,
+            {"USD": 400.0, "USDC": 0.0, "USDG": 0.0},
+        )
 
         with (
             patch.dict(os.environ, {"GOOGLE_DOCS_SHEET_ID": "test-sheet"}),
+            patch("sheets.fetch_portfolio", return_value=portfolio),
             patch("sheets.get_gspread_client", return_value=client),
+            patch(
+                "sheets.get_sdca_sheet_values",
+                return_value={
+                    "cash_usd": 250.0,
+                    "change_pct": 0.0,
+                    "kraken_btc": 0.0,
+                    "cold_btc": 0.0,
+                },
+            ),
+            patch("sheets.get_sdca_cash_on_kraken", return_value=100.0),
+            patch("sheets.get_btc_cold_balance", return_value=0.0),
+            patch("sheets.get_btc_usd_price", return_value=50_000.0),
+            patch("sheets.get_kraken_btc_balance", return_value=0.0),
         ):
-            update_sdca_cash_in_sheet(100.0)
+            update_current_allocations_in_sheet()
 
-        worksheet.update.assert_called_once_with(
-            "Q3", [[100.0]], value_input_option="RAW"
-        )
+        worksheet.update.assert_any_call("E8:E8", [[0.0]], value_input_option="RAW")
+        worksheet.update.assert_any_call("I8:I8", [[300.0]], value_input_option="RAW")
+        for call in worksheet.update.call_args_list:
+            self.assertNotIn(call.args[0], {"Q3", "Q6"})
+        for batch in worksheet.batch_update.call_args_list:
+            self.assertNotIn(
+                "Q3", [item["range"] for item in batch.args[0]]
+            )
+            self.assertNotIn(
+                "Q6", [item["range"] for item in batch.args[0]]
+            )
 
     def test_change_update_writes_only_q4(self):
         worksheet = Mock()
@@ -279,6 +333,7 @@ class SdcaSheetTests(unittest.TestCase):
                     "kraken_btc": 0.0,
                     "cold_btc": 0.0,
                 }),
+                patch("sheets.get_sdca_cash_on_kraken", return_value=0.0),
                 patch("sheets.get_btc_usd_price", return_value=50_000.0),
                 patch("sheets.get_kraken_btc_balance", return_value=0.0),
                 patch("sheets.get_gspread_client", return_value=client),
@@ -367,6 +422,7 @@ class SdcaSheetTests(unittest.TestCase):
                     "cold_btc": 0.0,
                 },
             ),
+            patch("sheets.get_sdca_cash_on_kraken", return_value=0.0),
             patch("sheets.get_btc_cold_balance", return_value=0.0),
             patch("sheets.get_btc_usd_price", return_value=50_000.0),
             patch("sheets.get_kraken_btc_balance", return_value=0.5),

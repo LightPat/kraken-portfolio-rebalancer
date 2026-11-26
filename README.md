@@ -16,8 +16,11 @@ margin trading permission. Shorts incur Kraken's opening fee plus the 4-hour
 rollover fee.
 
 The Signals sheet splits account equity between RSPS (N2) and SDCA (N3).
-RSPS sizing uses its split less the RSPS-only reserve in I3. SDCA uses its own
-USD cash pool in Q3 and BTC tracked in Q7 (Kraken) and Q8 (cold storage).
+N2 remains available for display and current-split comparison. RSPS investable
+sizing matches Signals!B2 exactly: E2 − I3 − Q6, with no N2 multiplier. Q6 is
+SDCA's manually tracked Kraken cash. Q3 (SDCA USD Left) is a manual planning
+balance, not a Kraken balance; the bot does not change Q3 or Q6. SDCA buy
+sizing uses Q3 and BTC tracked in Q7 (Kraken) and Q8 (cold storage).
 Set `TREZOR_BTC_PUB_KEY` in `.env` to the Trezor account-level Bitcoin xpub,
 ypub, or zpub. The bot derives receive addresses using the prefix-appropriate
 BIP44/49/84 format and sums confirmed plus unconfirmed balances from
