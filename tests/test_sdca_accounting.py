@@ -59,6 +59,39 @@ class CapitalSplitTests(unittest.TestCase):
         self.assertEqual(plan["current_stables_total"], 350.0)
         update_allocations.assert_called_once_with()
 
+    def test_rebalance_plan_subtracts_q6_from_combined_stables(self):
+        portfolio = (
+            {},
+            {},
+            {},
+            {},
+            50_000.0,
+            {"USD": 179.0, "USDC": 0.0, "USDG": 36_531.0},
+        )
+        with (
+            patch("rebalancer.get_kraken_exchange"),
+            patch("rebalancer.update_current_allocations_in_sheet"),
+            patch("rebalancer.fetch_portfolio", return_value=portfolio),
+            patch("rebalancer.get_target_allocations", return_value={}),
+            patch("rebalancer.fetch_margin_positions", return_value=[]),
+            patch("rebalancer.get_desired_cash_reserve", return_value=100.0),
+            patch("rebalancer.get_rsps_allocation_pct", return_value=0.7),
+            patch("rebalancer.get_sdca_cash_on_kraken", return_value=14_160.0),
+            patch(
+                "rebalancer.get_sdca_sheet_values",
+                return_value={
+                    "cash_usd": 0.0,
+                    "change_pct": 0.0,
+                    "kraken_btc": 0.0,
+                    "cold_btc": 0.0,
+                },
+            ),
+        ):
+            plan = rebalancer.generate_rebalance_plan()
+
+        self.assertEqual(plan["current_stables_total"], 22_550.0)
+        self.assertEqual(plan["investable_value"], 35_740.0)
+
 
 class SdcaCashAccountingTests(unittest.TestCase):
     def test_zero_change_returns_empty_plan_without_fetching_market(self):

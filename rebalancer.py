@@ -34,6 +34,7 @@ from kraken import (
     get_order_remaining,
     get_free_balance,
     get_btc_usd_price,
+    _stable_balances_after_reserve,
 )
 from bot import CRYPTO_DECIMALS, PRICE_DECIMALS
 
@@ -162,10 +163,10 @@ def generate_rebalance_plan(
     rsps_allocation_pct = get_rsps_allocation_pct()
     sdca_values = get_sdca_sheet_values()
     sdca_cash_on_kraken = get_sdca_cash_on_kraken()
-    stable_breakdown = dict(stable_breakdown)
-    stable_breakdown["USD"] = max(
-        0.0,
-        stable_breakdown.get("USD", 0.0) - sdca_cash_on_kraken,
+    stable_breakdown = _stable_balances_after_reserve(
+        dict(stable_breakdown),
+        sdca_cash_on_kraken,
+        preferred_quote="USD",
     )
 
     if sdca_values["kraken_btc"] > 0:

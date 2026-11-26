@@ -15,6 +15,47 @@ from sheets import (
 
 
 class UpdateCurrentAllocationsTests(unittest.TestCase):
+    def test_allocation_refresh_subtracts_q6_across_stable_balances(self):
+        worksheet = Mock()
+        worksheet.get_values.side_effect = lambda cell_range: {
+            "A8:A": [["BTC"]],
+            "H8:H": [["USD"], ["USDG"]],
+        }[cell_range]
+        client = Mock()
+        client.open_by_key.return_value.worksheet.return_value = worksheet
+        portfolio = (
+            {},
+            {},
+            {},
+            {},
+            50_000.0,
+            {"USD": 179.0, "USDC": 0.0, "USDG": 36_531.0},
+        )
+
+        with (
+            patch.dict(os.environ, {"GOOGLE_DOCS_SHEET_ID": "test-sheet"}),
+            patch("sheets.fetch_portfolio", return_value=portfolio),
+            patch("sheets.get_gspread_client", return_value=client),
+            patch(
+                "sheets.get_sdca_sheet_values",
+                return_value={
+                    "cash_usd": 0.0,
+                    "change_pct": 0.0,
+                    "kraken_btc": 0.0,
+                    "cold_btc": 0.0,
+                },
+            ),
+            patch("sheets.get_sdca_cash_on_kraken", return_value=14_160.0),
+            patch("sheets.get_btc_cold_balance", return_value=0.0),
+            patch("sheets.get_btc_usd_price", return_value=50_000.0),
+            patch("sheets.get_kraken_btc_balance", return_value=0.0),
+        ):
+            update_current_allocations_in_sheet()
+
+        worksheet.update.assert_any_call(
+            "I8:I9", [[0.0], [22_550.0]], value_input_option="RAW"
+        )
+
     def test_writes_short_used_margin_as_positive_current_allocation(self):
         worksheet = Mock()
         worksheet.get_values.return_value = [["BTC"]]
