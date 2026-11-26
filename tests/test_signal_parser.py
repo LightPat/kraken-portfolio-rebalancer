@@ -1,6 +1,6 @@
 import unittest
 
-from sheets import parse_signal_update
+from sheets import parse_sdca_signal_update, parse_signal_update
 
 
 class ParseSignalUpdateTests(unittest.TestCase):
@@ -58,6 +58,45 @@ class ParseSignalUpdateTests(unittest.TestCase):
                 "ENA": (0.0, "Short"),
             },
         )
+
+
+class ParseSDCASignalUpdateTests(unittest.TestCase):
+    def test_explicit_buy_signal_returns_positive_fraction(self):
+        text = """
+⚡ **SDCA Signal Update** ⚡
+📈 **Today's Accumulation/Distribution Rate:** 📈
+- **BUY 8.05% :bitcoin: WITH CASH RESERVE** 💵
+"""
+        self.assertAlmostEqual(parse_sdca_signal_update(text), 0.0805)
+
+    def test_default_threshold_signal_returns_positive_one_percent(self):
+        text = """
+⚡ **SDCA Signal Update** ⚡
+📈 **Today's Accumulation/Distribution Rate:** 📈
+- **SDCA Accelerated Accumulation Threshold not passed -
+  Default to ~1% per-day perpetually** ♻️
+"""
+        self.assertAlmostEqual(parse_sdca_signal_update(text), 0.01)
+
+    def test_sell_and_distribution_signal_variants_return_negative_fraction(self):
+        self.assertAlmostEqual(
+            parse_sdca_signal_update("⚡ SDCA Signal Update ⚡\n- SELL 25%"),
+            -0.25,
+        )
+        self.assertAlmostEqual(
+            parse_sdca_signal_update("⚡ SDCA Signal Update ⚡\n- DISTRIBUTE 10%"),
+            -0.1,
+        )
+
+    def test_standalone_negative_percentage_is_a_sell(self):
+        self.assertAlmostEqual(
+            parse_sdca_signal_update("SDCA Signal Update\nChange: -12.5%"),
+            -0.125,
+        )
+
+    def test_signal_without_extractable_percentage_raises(self):
+        with self.assertRaisesRegex(ValueError, "No SDCA change percentage"):
+            parse_sdca_signal_update("SDCA Signal Update\nNo allocation today")
 
 
 if __name__ == "__main__":

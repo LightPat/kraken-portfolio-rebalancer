@@ -232,6 +232,58 @@ def get_sdca_sheet_values() -> dict[str, float]:
     }
 
 
+def parse_sdca_signal_update(signal_text: str) -> float:
+    """Parse an SDCA signal into a signed decimal change for Signals!Q4."""
+    default_match = re.search(
+        r"threshold\s+not\s+passed.*?default\s+to\s+~?\s*"
+        r"([+-]?\d+(?:\.\d+)?)\s*%",
+        signal_text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if default_match:
+        return abs(float(default_match.group(1))) / 100
+
+    action_matches = []
+    for action, pattern in (
+        (
+            "buy",
+            r"\bBUY\s+([+-]?\d+(?:\.\d+)?)\s*%",
+        ),
+        (
+            "sell",
+            r"\b(?:SELL|DISTRIBUTE)\s+([+-]?\d+(?:\.\d+)?)\s*%",
+        ),
+    ):
+        for match in re.finditer(pattern, signal_text, re.IGNORECASE):
+            percentage = float(match.group(1))
+            if action == "buy" and percentage < 0:
+                raise ValueError("An SDCA BUY percentage cannot be negative")
+            signed_pct = abs(percentage) if action == "buy" else -abs(percentage)
+            action_matches.append(signed_pct / 100)
+
+    negative_matches = [
+        -float(match.group(1)) / 100
+        for match in re.finditer(
+            r"(?<![\w.])-\s*(\d+(?:\.\d+)?)\s*%", signal_text
+        )
+    ]
+    parsed_values = set(action_matches + negative_matches)
+    if len(parsed_values) == 1:
+        return parsed_values.pop()
+    if len(parsed_values) > 1:
+        raise ValueError("SDCA signal contains conflicting change percentages")
+    raise ValueError("No SDCA change percentage could be extracted")
+
+
+def update_sdca_change_in_sheet(change_pct: float) -> None:
+    """Write only the signed SDCA change fraction to Signals!Q4."""
+    if not math.isfinite(change_pct):
+        raise ValueError("SDCA change percentage must be a finite number")
+    _get_signals_worksheet().update(
+        "Q4", [[change_pct]], value_input_option="RAW"
+    )
+
+
 def _derive_trezor_receive_address(account_key: bip32.HDKey, index: int) -> str:
     child_key = account_key.derive([0, index]).key
     version = account_key.version

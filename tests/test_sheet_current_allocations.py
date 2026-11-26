@@ -9,6 +9,7 @@ from sheets import (
     get_sdca_sheet_values,
     update_current_allocations_in_sheet,
     update_sdca_cash_in_sheet,
+    update_sdca_change_in_sheet,
 )
 
 
@@ -131,6 +132,15 @@ class SdcaSheetTests(unittest.TestCase):
 
         worksheet.update.assert_called_once_with(
             "Q3", [[100.0]], value_input_option="RAW"
+        )
+
+    def test_change_update_writes_only_q4(self):
+        worksheet = Mock()
+        with patch("sheets._get_signals_worksheet", return_value=worksheet):
+            update_sdca_change_in_sheet(-0.25)
+
+        worksheet.update.assert_called_once_with(
+            "Q4", [[-0.25]], value_input_option="RAW"
         )
 
     def test_missing_trezor_public_key_means_zero_cold_btc(self):
