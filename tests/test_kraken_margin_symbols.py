@@ -103,9 +103,10 @@ class QuoteCurrencyTests(unittest.TestCase):
             patch("kraken.get_kraken_exchange", return_value=exchange),
             patch("kraken.fetch_margin_positions", return_value=[position]),
         ):
-            warnings = kraken.validate_quote_balances([trade])
+            result = kraken.validate_quote_balances([trade])
 
-        self.assertEqual(warnings, [])
+        self.assertEqual(result.warnings, [])
+        self.assertFalse(result.insufficient)
 
     def test_quote_balance_validation_reserves_short_proceeds_for_new_shorts(self):
         exchange = Mock()
@@ -130,10 +131,11 @@ class QuoteCurrencyTests(unittest.TestCase):
             patch("kraken.get_kraken_exchange", return_value=exchange),
             patch("kraken.fetch_margin_positions", return_value=[position]),
         ):
-            warnings = kraken.validate_quote_balances([trade])
+            result = kraken.validate_quote_balances([trade])
 
-        self.assertEqual(len(warnings), 1)
-        self.assertIn("requires $100.00 more USD", warnings[0])
+        self.assertEqual(len(result.warnings), 1)
+        self.assertTrue(result.insufficient)
+        self.assertIn("requires $100.00 more USD", result.warnings[0])
 
     def test_quote_balance_validation_credits_spot_reductions_to_stable_balance(self):
         exchange = Mock()
@@ -157,9 +159,10 @@ class QuoteCurrencyTests(unittest.TestCase):
             patch("kraken.get_kraken_exchange", return_value=exchange),
             patch("kraken.fetch_margin_positions", return_value=[]),
         ):
-            warnings = kraken.validate_quote_balances([reduction, cover])
+            result = kraken.validate_quote_balances([reduction, cover])
 
-        self.assertEqual(warnings, [])
+        self.assertEqual(result.warnings, [])
+        self.assertFalse(result.insufficient)
 
     def test_quote_balance_validation_preserves_sdca_cash(self):
         exchange = Mock()
@@ -176,12 +179,55 @@ class QuoteCurrencyTests(unittest.TestCase):
             patch("kraken.get_kraken_exchange", return_value=exchange),
             patch("kraken.fetch_margin_positions", return_value=[]),
         ):
-            warnings = kraken.validate_quote_balances(
+            result = kraken.validate_quote_balances(
                 [trade], reserved_quote_balances={"USD": 250.0}
             )
 
-        self.assertEqual(len(warnings), 1)
-        self.assertIn("requires $50.00 more USD", warnings[0])
+        self.assertEqual(len(result.warnings), 1)
+        self.assertTrue(result.insufficient)
+        self.assertIn("requires $50.00 more USD", result.warnings[0])
+
+    def test_quote_balance_validation_uses_combined_stables_after_q6(self):
+        exchange = Mock()
+        exchange.fetch_balance.return_value = {
+            "free": {"USD": 179.0, "USDC": 0.0, "USDG": 36_000.0}
+        }
+        short_position = {
+            "symbol": "BTC/USD:BTNL",
+            "side": "short",
+            "entry_price": 1_000.0,
+            "size_base": 1.0,
+        }
+        trade = {
+            "symbol": "ETH/USD:BTNL",
+            "quote": "USD",
+            "asset": "ETH",
+            "action": "open_short",
+            "amount_usd": 22.05,
+            "capital_usd": 22.05,
+        }
+
+        with (
+            patch("kraken.get_kraken_exchange", return_value=exchange),
+            patch("kraken.fetch_margin_positions", return_value=[short_position]),
+        ):
+            result = kraken.validate_quote_balances(
+                [trade], reserved_quote_balances={"USD": 14_160.0}
+            )
+
+        self.assertFalse(result.insufficient)
+        self.assertEqual(len(result.warnings), 1)
+        self.assertIn(
+            "Convert $22.05 USDG → USD to open short ETH/USD",
+            result.warnings[0],
+        )
+        self.assertIn(
+            "Total stables after Q6 reserve: $22,019.00", result.warnings[0]
+        )
+        self.assertIn(
+            "Total available after existing short-proceeds reserve: $21,019.00",
+            result.warnings[0],
+        )
 
 
 class MarginSymbolTests(unittest.TestCase):

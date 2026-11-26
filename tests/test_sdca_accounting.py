@@ -130,7 +130,10 @@ class SdcaCashAccountingTests(unittest.TestCase):
             }),
             patch("rebalancer.get_kraken_exchange") as exchange,
             patch("rebalancer.get_best_trading_symbol", return_value="BTC/USD"),
-            patch("rebalancer.validate_quote_balances", return_value=[]),
+            patch(
+                "rebalancer.validate_quote_balances",
+                return_value=Mock(warnings=[], insufficient=False),
+            ),
         ):
             exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
             plan = rebalancer.generate_sdca_plan()
@@ -155,7 +158,8 @@ class SdcaCashAccountingTests(unittest.TestCase):
             patch("rebalancer.get_kraken_exchange") as exchange,
             patch("rebalancer.get_best_trading_symbol", return_value="BTC/USD"),
             patch(
-                "rebalancer.validate_quote_balances", return_value=[warning]
+                "rebalancer.validate_quote_balances",
+                return_value=Mock(warnings=[warning], insufficient=True),
             ) as validate_balances,
         ):
             exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
@@ -189,7 +193,10 @@ class SdcaCashAccountingTests(unittest.TestCase):
                 },
             ),
             patch("rebalancer.get_best_trading_symbol", return_value="BTC/USD"),
-            patch("rebalancer.validate_quote_balances", return_value=[]),
+            patch(
+                "rebalancer.validate_quote_balances",
+                return_value=Mock(warnings=[], insufficient=False),
+            ),
         ):
             exchange.return_value.fetch_ticker.return_value = {"last": 100.0}
             result = rebalancer.generate_sdca_plan()
@@ -205,6 +212,7 @@ class SdcaCashAccountingTests(unittest.TestCase):
             "amount_usd": 20.0,
             "amount_base": 0.2,
             "quote_warnings": [warning],
+            "quote_insufficient": True,
             "dry_run": False,
         }
         with (

@@ -278,11 +278,19 @@ async def sdca_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         description += (
             "\n\n"
             + "\n".join(plan["quote_warnings"])
-            + "\n💱 Convert or fund USD on Kraken, then run /sdca again "
-            "to refresh the plan."
+        )
+    if plan.get("quote_insufficient", False):
+        description += (
+            "\n⏸️ Execution paused: total available stablecoins do not cover "
+            "this trade after reserves."
         )
         await status_message.edit_text(description)
         return
+    if plan.get("quote_warnings"):
+        description += (
+            "\n⚠️ Check quote availability before execution; the trade may "
+            "require conversion."
+        )
 
     callback_data = "sdca_confirm"
     keyboard = [[

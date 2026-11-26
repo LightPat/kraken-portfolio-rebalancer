@@ -432,6 +432,7 @@ def generate_sdca_plan(
             "kraken_btc": sdca["kraken_btc"],
             "cold_btc": sdca["cold_btc"],
             "quote_warnings": [],
+            "quote_insufficient": False,
             "dry_run": dry_run,
         }
 
@@ -450,8 +451,9 @@ def generate_sdca_plan(
         target_btc = 0.0
         unavailable_btc = 0.0
         quote_warnings = []
+        quote_insufficient = False
         if not dry_run:
-            quote_warnings = validate_quote_balances(
+            quote_check = validate_quote_balances(
                 [
                     {
                         "asset": "BTC",
@@ -463,6 +465,8 @@ def generate_sdca_plan(
                     }
                 ]
             )
+            quote_warnings = quote_check.warnings
+            quote_insufficient = quote_check.insufficient
     elif action == "sell":
         target_btc = abs(change_pct) * (sdca["kraken_btc"] + sdca["cold_btc"])
         free_btc = get_free_balance("BTC")
@@ -470,12 +474,14 @@ def generate_sdca_plan(
         unavailable_btc = max(0.0, target_btc - amount_base)
         amount_usd = amount_base * price
         quote_warnings = []
+        quote_insufficient = False
     else:
         target_btc = 0.0
         unavailable_btc = 0.0
         amount_base = 0.0
         amount_usd = 0.0
         quote_warnings = []
+        quote_insufficient = False
 
     return {
         "action": action,
@@ -490,6 +496,7 @@ def generate_sdca_plan(
         "kraken_btc": sdca["kraken_btc"],
         "cold_btc": sdca["cold_btc"],
         "quote_warnings": quote_warnings,
+        "quote_insufficient": quote_insufficient,
         "dry_run": dry_run,
     }
 
@@ -552,9 +559,9 @@ def execute_sdca_trade(
         return {"results": results, "plan": plan, "dry_run": plan["dry_run"]}
     if plan.get("quote_warnings"):
         results.extend(plan["quote_warnings"])
+    if plan.get("quote_insufficient", False):
         results.append(
-            "⏸️ SDCA buy paused until the required USD funds are available. "
-            "Convert or fund USD, then generate a fresh plan."
+            "⏸️ SDCA buy paused until the required stablecoin funds are available."
         )
         return {
             "status": "blocked",
@@ -1027,11 +1034,11 @@ def execute_trades(
     ]
 
     if short_reductions:
-        cover_warnings = validate_quote_balances(
+        cover_check = validate_quote_balances(
             short_reductions, reserved_quote_balances=reserved_sdca_cash
         )
-        if cover_warnings:
-            results.extend(cover_warnings)
+        results.extend(cover_check.warnings)
+        if cover_check.insufficient:
             results.append(
                 "⏸️ Short reductions paused until the required quote funds are available."
             )
@@ -1122,11 +1129,11 @@ def execute_trades(
 
     spending_trades = short_openings + long_openings
     if spending_trades:
-        opening_warnings = validate_quote_balances(
+        opening_check = validate_quote_balances(
             spending_trades, reserved_quote_balances=reserved_sdca_cash
         )
-        if opening_warnings:
-            results.extend(opening_warnings)
+        results.extend(opening_check.warnings)
+        if opening_check.insufficient:
             results.append(
                 "⏸️ New positions paused until the required quote funds are available."
             )

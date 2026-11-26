@@ -176,7 +176,10 @@ class RebalancerMarginOrderTests(unittest.TestCase):
             patch("rebalancer.os.getenv", return_value="false"),
             patch("rebalancer.get_kraken_exchange"),
             patch("rebalancer.cancel_open_orders", return_value=[]) as cancel,
-            patch("rebalancer.validate_quote_balances", return_value=[]) as validate,
+            patch(
+                "rebalancer.validate_quote_balances",
+                return_value=Mock(warnings=[], insufficient=False),
+            ) as validate,
             patch(
                 "rebalancer.get_sdca_cash_on_kraken", return_value=25.0
             ) as get_cash_on_kraken,
